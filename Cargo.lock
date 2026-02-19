@@ -822,6 +822,7 @@ name = "myr-adapters"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "myr-core",
  "mysql_async",
  "serde_json",

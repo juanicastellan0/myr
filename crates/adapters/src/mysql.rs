@@ -1,14 +1,13 @@
-use std::collections::VecDeque;
-
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use myr_core::connection_manager::{BackendError, ConnectionBackend};
 use myr_core::profiles::{ConnectionProfile, TlsMode};
 use myr_core::query_runner::{QueryBackend, QueryBackendError, QueryRow, QueryRowStream};
 use myr_core::schema_cache::{
     ColumnSchema, DatabaseSchema, SchemaBackend, SchemaBackendError, SchemaCatalog, TableSchema,
 };
-use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, OptsBuilder, Pool, Row, Value};
+use mysql_async::prelude::{Query, Queryable};
+use mysql_async::{Conn, OptsBuilder, Pool, ResultSetStream, Row, TextProtocol, Value};
 
 #[derive(Debug, Clone, Default)]
 pub struct MysqlConnectionBackend;
@@ -117,48 +116,58 @@ impl SchemaBackend for MysqlDataBackend {
 }
 
 #[derive(Debug)]
-pub struct MysqlBufferedRowStream {
-    rows: VecDeque<QueryRow>,
+pub struct MysqlStreamingRowStream {
+    stream: Option<ResultSetStream<'static, 'static, 'static, Row, TextProtocol>>,
     cancelled: bool,
 }
 
-impl MysqlBufferedRowStream {
-    fn from_rows(rows: Vec<Row>) -> Self {
+impl MysqlStreamingRowStream {
+    fn new(stream: ResultSetStream<'static, 'static, 'static, Row, TextProtocol>) -> Self {
         Self {
-            rows: rows
-                .into_iter()
-                .map(row_to_query_row)
-                .collect::<VecDeque<_>>(),
+            stream: Some(stream),
             cancelled: false,
         }
     }
 }
 
 #[async_trait]
-impl QueryRowStream for MysqlBufferedRowStream {
+impl QueryRowStream for MysqlStreamingRowStream {
     async fn next_row(&mut self) -> Result<Option<QueryRow>, QueryBackendError> {
         if self.cancelled {
             return Ok(None);
         }
-        Ok(self.rows.pop_front())
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(None);
+        };
+
+        match stream.next().await {
+            Some(Ok(row)) => Ok(Some(row_to_query_row(row))),
+            Some(Err(error)) => Err(to_query_error(error)),
+            None => {
+                self.stream = None;
+                Ok(None)
+            }
+        }
     }
 
     async fn cancel(&mut self) -> Result<(), QueryBackendError> {
         self.cancelled = true;
-        self.rows.clear();
+        self.stream = None;
         Ok(())
     }
 }
 
 #[async_trait]
 impl QueryBackend for MysqlDataBackend {
-    type Stream = MysqlBufferedRowStream;
+    type Stream = MysqlStreamingRowStream;
 
     async fn start_query(&self, sql: &str) -> Result<Self::Stream, QueryBackendError> {
-        let mut conn = self.pool.get_conn().await.map_err(to_query_error)?;
-        let rows = conn.query::<Row, _>(sql).await.map_err(to_query_error)?;
-        conn.disconnect().await.map_err(to_query_error)?;
-        Ok(MysqlBufferedRowStream::from_rows(rows))
+        let stream = sql
+            .to_string()
+            .stream::<Row, _>(self.pool.clone())
+            .await
+            .map_err(to_query_error)?;
+        Ok(MysqlStreamingRowStream::new(stream))
     }
 }
 
