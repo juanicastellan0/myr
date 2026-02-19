@@ -61,8 +61,11 @@ and benchmark/coverage gates. The detailed product backlog is in
 - Coverage report:
   - `cargo llvm-cov --workspace --all-features --html --output-dir target/coverage/html`
 - CI coverage gate:
-  - minimum lines: `75%`
+  - minimum lines: `80%`
+  - MySQL-backed integration tests enabled via `MYR_RUN_MYSQL_INTEGRATION=1`
   - see `.github/workflows/ci.yml`
+- Run MySQL integration tests locally (optional):
+  - `MYR_DB_PASSWORD=root MYR_RUN_MYSQL_INTEGRATION=1 cargo test -p myr-adapters --test mysql_integration`
 - Additional quality docs:
   - `docs/quality.md`
 

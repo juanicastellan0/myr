@@ -32,12 +32,15 @@ cargo llvm-cov report --summary-only
 See `.github/workflows/ci.yml` for gate configuration.
 
 Current gate settings:
-- line coverage threshold: `75%`
+- line coverage threshold: `80%`
+- MySQL integration coverage enabled with:
+  - `MYR_DB_PASSWORD=root`
+  - `MYR_RUN_MYSQL_INTEGRATION=1`
 - command:
 
 ```bash
 cargo llvm-cov --workspace --all-features \
   --json --summary-only \
   --output-path target/coverage/summary.json \
-  --fail-under-lines 75
+  --fail-under-lines 80
 ```

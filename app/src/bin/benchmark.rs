@@ -318,10 +318,35 @@ fn io_other(error: impl std::fmt::Display) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use myr_adapters::mysql::MysqlDataBackend;
+    use myr_core::profiles::ConnectionProfile;
+
     use super::{
-        build_insert_batch_sql, enforce_assertions, io_other, next_value, parse_args_from,
-        BenchmarkConfig, ParseOutcome,
+        build_insert_batch_sql, enforce_assertions, ensure_seed_data, execute_sql, io_other,
+        next_value, parse_args_from, query_scalar_u64, run_query_benchmark, BenchmarkConfig,
+        ParseOutcome,
     };
+
+    fn mysql_integration_enabled() -> bool {
+        matches!(
+            std::env::var("MYR_RUN_MYSQL_INTEGRATION").ok().as_deref(),
+            Some("1")
+        )
+    }
+
+    fn integration_profile(database: Option<&str>) -> ConnectionProfile {
+        let host = std::env::var("MYR_TEST_DB_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let user = std::env::var("MYR_TEST_DB_USER").unwrap_or_else(|_| "root".to_string());
+        let port = std::env::var("MYR_TEST_DB_PORT")
+            .ok()
+            .and_then(|raw| raw.parse::<u16>().ok())
+            .unwrap_or(3306);
+
+        let mut profile = ConnectionProfile::new("bench-integration", host, user);
+        profile.port = port;
+        profile.database = database.map(str::to_string);
+        profile
+    }
 
     #[test]
     fn parse_args_from_applies_overrides() {
@@ -417,5 +442,71 @@ mod tests {
     fn io_other_uses_display_text() {
         let err = io_other("boom");
         assert_eq!(err.to_string(), "boom");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn benchmark_helpers_work_against_mysql() {
+        if !mysql_integration_enabled() {
+            return;
+        }
+
+        let database = "myr_bench_cov";
+        let admin_backend = MysqlDataBackend::from_profile(&integration_profile(None));
+        execute_sql(
+            &admin_backend,
+            &format!("CREATE DATABASE IF NOT EXISTS `{database}`"),
+        )
+        .await
+        .expect("create db");
+        admin_backend.disconnect().await.expect("disconnect admin");
+
+        let backend = MysqlDataBackend::from_profile(&integration_profile(Some(database)));
+        execute_sql(&backend, "DROP TABLE IF EXISTS events")
+            .await
+            .expect("drop table");
+        ensure_seed_data(&backend, 25).await.expect("seed rows");
+
+        let rows = query_scalar_u64(&backend, "SELECT COUNT(*) FROM events")
+            .await
+            .expect("count rows");
+        assert!(rows >= 25);
+
+        let metrics = run_query_benchmark(
+            &backend,
+            "SELECT id, user_id, category, payload, created_at FROM events ORDER BY id LIMIT 20",
+        )
+        .await
+        .expect("run query benchmark");
+        assert!(metrics.rows_streamed > 0);
+        assert!(metrics.elapsed > std::time::Duration::ZERO);
+
+        execute_sql(&backend, "DROP TABLE IF EXISTS events")
+            .await
+            .expect("cleanup table");
+        backend.disconnect().await.expect("disconnect");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_scalar_reports_parse_errors() {
+        if !mysql_integration_enabled() {
+            return;
+        }
+
+        let database = "myr_bench_cov";
+        let admin_backend = MysqlDataBackend::from_profile(&integration_profile(None));
+        execute_sql(
+            &admin_backend,
+            &format!("CREATE DATABASE IF NOT EXISTS `{database}`"),
+        )
+        .await
+        .expect("create db");
+        admin_backend.disconnect().await.expect("disconnect admin");
+
+        let backend = MysqlDataBackend::from_profile(&integration_profile(Some(database)));
+        let err = query_scalar_u64(&backend, "SELECT 'not-an-int'")
+            .await
+            .expect_err("parse should fail");
+        assert!(err.to_string().contains("failed to parse scalar value"));
+        backend.disconnect().await.expect("disconnect");
     }
 }

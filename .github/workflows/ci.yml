@@ -40,8 +40,25 @@ jobs:
   coverage-gate:
     name: Coverage gate (llvm-cov)
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
     env:
-      COVERAGE_MIN_LINES: "75"
+      COVERAGE_MIN_LINES: "80"
+      MYR_DB_PASSWORD: root
+      MYR_RUN_MYSQL_INTEGRATION: "1"
+      MYR_TEST_DB_HOST: 127.0.0.1
+      MYR_TEST_DB_PORT: "3306"
+      MYR_TEST_DB_USER: root
     steps:
       - name: Checkout
         uses: actions/checkout@v4
