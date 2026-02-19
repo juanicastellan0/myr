@@ -61,3 +61,10 @@ cargo run -p myr-app --bin benchmark -- \
 ```bash
 bench/scripts/run_benchmark.sh
 ```
+
+## CI Perf Smoke
+
+CI runs a benchmark smoke check in `.github/workflows/ci.yml` against a MySQL service with:
+- `--seed-rows 10000`
+- `--assert-first-row-ms 5000`
+- `--assert-min-rows-per-sec 500`

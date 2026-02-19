@@ -12,8 +12,18 @@ Thanks for contributing.
 
 - Keep changes scoped and testable.
 - Add or update tests for behavior changes.
-- Run `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` before opening a PR.
+- Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo test`, and `cargo build` before opening a PR.
+- Run coverage locally when your change affects core behavior:
+  - `cargo llvm-cov --workspace --all-features --summary-only`
 - Update docs when behavior or architecture changes.
+
+## CI quality gates
+
+- CI enforces formatting, clippy, tests, build, perf smoke checks, and coverage.
+- Coverage gate currently requires at least `75%` line coverage and excludes
+  `crates/tui/src/lib.rs` from threshold evaluation.
+- See `.github/workflows/ci.yml` and `docs/quality.md`.
 
 ## Commit style
 
