@@ -20,6 +20,13 @@ Project bootstrap complete. The detailed product backlog is in `fast-mysql-tui-e
 1. Install Rust via `rustup`.
 2. Run `cargo build` from the repository root.
 3. Run `cargo test` to verify baseline health.
+4. Start the app with `cargo run -p myr-app`.
+
+## MySQL Connection Notes
+
+- Connection profiles in the TUI now attempt real MySQL connections via `mysql_async`.
+- Passwords are read from the `MYR_DB_PASSWORD` environment variable.
+- Schema/table loading and query execution use the live adapter when connected.
 
 ## License
 

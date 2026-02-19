@@ -11,13 +11,16 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use myr_adapters::export::{export_rows_to_csv, export_rows_to_json};
+use myr_adapters::mysql::{MysqlConnectionBackend, MysqlDataBackend};
 use myr_core::actions_engine::{
     ActionContext, ActionId, ActionInvocation, ActionsEngine, AppView, SchemaSelection,
 };
+use myr_core::connection_manager::ConnectionManager;
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore};
-use myr_core::query_runner::QueryRow;
+use myr_core::query_runner::{CancellationToken, QueryRow, QueryRunner};
 use myr_core::results_buffer::ResultsRingBuffer;
 use myr_core::safe_mode::{ConfirmationToken, GuardDecision, SafeModeGuard};
+use myr_core::schema_cache::SchemaCacheService;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -143,6 +146,11 @@ struct TuiApp {
     pane: Pane,
     wizard_form: ConnectionWizardForm,
     connected_profile: Option<String>,
+    connection_manager: Option<ConnectionManager<MysqlConnectionBackend>>,
+    data_backend: Option<MysqlDataBackend>,
+    schema_cache: Option<SchemaCacheService<MysqlDataBackend>>,
+    schema_databases: Vec<String>,
+    active_database: Option<String>,
     schema_tables: Vec<String>,
     selected_table_index: usize,
     show_help: bool,
@@ -177,6 +185,11 @@ impl Default for TuiApp {
             pane: Pane::ConnectionWizard,
             wizard_form: ConnectionWizardForm::default(),
             connected_profile: None,
+            connection_manager: None,
+            data_backend: None,
+            schema_cache: None,
+            schema_databases: Vec::new(),
+            active_database: None,
             schema_tables: DEMO_SCHEMA_TABLES
                 .iter()
                 .map(|table| (*table).to_string())
@@ -278,7 +291,7 @@ impl TuiApp {
     }
 
     fn on_tick(&mut self) {
-        if self.query_running {
+        if self.query_running && self.data_backend.is_none() {
             if self.query_ticks_remaining == 0 {
                 self.query_running = false;
                 self.populate_demo_results();
@@ -351,24 +364,79 @@ impl TuiApp {
             self.wizard_form.user.clone(),
         );
         profile.port = port;
-        profile.database = Some(self.wizard_form.database.clone());
+        profile.database = if self.wizard_form.database.trim().is_empty() {
+            None
+        } else {
+            Some(self.wizard_form.database.clone())
+        };
+
+        let connection_backend = MysqlConnectionBackend;
+        let mut manager = ConnectionManager::new(connection_backend);
+        let connect_latency = match block_on_result(manager.connect(profile.clone())) {
+            Ok(latency) => latency,
+            Err(error) => {
+                self.status_line = format!("Connect failed: {error}");
+                return;
+            }
+        };
+
+        let data_backend = MysqlDataBackend::from_profile(&profile);
+        let mut schema_cache =
+            SchemaCacheService::new(data_backend.clone(), Duration::from_secs(10));
+        let databases = match block_on_result(schema_cache.list_databases()) {
+            Ok(databases) => databases,
+            Err(error) => {
+                self.status_line = format!("Connected, but schema fetch failed: {error}");
+                Vec::new()
+            }
+        };
+
+        let mut active_database = profile.database.clone();
+        if active_database.is_none() {
+            active_database = databases.first().cloned();
+        }
+
+        let tables = if let Some(database_name) = active_database.as_deref() {
+            match block_on_result(schema_cache.list_tables(database_name)) {
+                Ok(tables) => tables,
+                Err(error) => {
+                    self.status_line = format!("Connected, but table fetch failed: {error}");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
 
         match FileProfilesStore::load_default() {
             Ok(mut store) => {
                 store.upsert_profile(profile.clone());
                 if let Err(error) = store.persist() {
-                    self.status_line = format!("Connected (profile save failed: {error})");
+                    self.status_line = format!(
+                        "Connected in {:.1?} (profile save failed: {error})",
+                        connect_latency
+                    );
                 } else {
-                    self.status_line = format!("Connected as profile `{}`", profile.name);
+                    self.status_line =
+                        format!("Connected as `{}` in {:.1?}", profile.name, connect_latency);
                 }
             }
             Err(error) => {
-                self.status_line = format!("Connected (profile load failed: {error})");
+                self.status_line = format!(
+                    "Connected in {:.1?} (profile load failed: {error})",
+                    connect_latency
+                );
             }
         }
 
+        self.connection_manager = Some(manager);
+        self.data_backend = Some(data_backend);
+        self.schema_cache = Some(schema_cache);
+        self.schema_databases = databases;
+        self.active_database = active_database.clone();
         self.connected_profile = Some(profile.name.clone());
-        self.selection.database = profile.database;
+        self.selection.database = active_database;
+        self.schema_tables = tables;
         self.selected_table_index = 0;
         self.selection.table = self.schema_tables.first().cloned();
         self.selection.column = Some("id".to_string());
@@ -606,12 +674,42 @@ impl TuiApp {
     }
 
     fn start_query(&mut self, sql: String) {
-        self.query_running = true;
-        self.query_ticks_remaining = QUERY_DURATION_TICKS;
-        self.cancel_requested = false;
-        self.has_results = false;
         self.query_editor_text = sql;
         self.pane = Pane::Results;
+        self.cancel_requested = false;
+        self.has_results = false;
+
+        if let Some(data_backend) = &self.data_backend {
+            self.query_running = true;
+            self.query_ticks_remaining = 0;
+            self.results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
+            let runner = QueryRunner::new(data_backend.clone());
+            let cancellation = CancellationToken::new();
+
+            match block_on_result(runner.execute_streaming(
+                &self.query_editor_text,
+                &mut self.results,
+                &cancellation,
+            )) {
+                Ok(summary) => {
+                    self.query_running = false;
+                    self.has_results = !self.results.is_empty();
+                    self.results_cursor = 0;
+                    self.status_line = format!(
+                        "Query returned {} rows in {:.1?}",
+                        summary.rows_streamed, summary.elapsed
+                    );
+                }
+                Err(error) => {
+                    self.query_running = false;
+                    self.status_line = format!("Query failed: {error}");
+                }
+            }
+            return;
+        }
+
+        self.query_running = true;
+        self.query_ticks_remaining = QUERY_DURATION_TICKS;
         self.status_line = "Running query...".to_string();
     }
 
@@ -683,7 +781,7 @@ impl TuiApp {
             selection: self.selection.clone(),
             query_text,
             query_running: self.query_running,
-            has_results: self.has_results || matches!(self.pane, Pane::Results),
+            has_results: self.has_results,
         }
     }
 
@@ -782,6 +880,16 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         ])
         .split(frame.area());
 
+    let latency_text = app
+        .connection_manager
+        .as_ref()
+        .and_then(|manager| manager.status().last_latency)
+        .map_or("n/a".to_string(), |latency| format!("{latency:.1?}"));
+    let cache_ttl_text = app
+        .schema_cache
+        .as_ref()
+        .map_or("n/a".to_string(), |cache| format!("{:.1?}", cache.ttl()));
+
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             format!(" Pane: {} ", app.pane_name()),
@@ -799,6 +907,10 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             "DB: {}",
             app.selection.database.as_deref().unwrap_or("-")
         )),
+        Span::raw(" | "),
+        Span::raw(format!("Latency: {latency_text}")),
+        Span::raw(" | "),
+        Span::raw(format!("Schema TTL: {cache_ttl_text}")),
         Span::raw(" | "),
         Span::raw(format!(
             "SAFE mode: {}",
@@ -882,6 +994,20 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 Line::from("Press 1 for preview action."),
                 Line::from(""),
             ];
+
+            if app.schema_databases.is_empty() {
+                lines.push(Line::from("Databases: (none loaded)"));
+            } else {
+                lines.push(Line::from(format!(
+                    "Databases: {}",
+                    app.schema_databases.join(", ")
+                )));
+            }
+            lines.push(Line::from(format!(
+                "Active DB: {}",
+                app.active_database.as_deref().unwrap_or("-")
+            )));
+            lines.push(Line::from(""));
 
             for (index, table) in app.schema_tables.iter().enumerate() {
                 let marker = if index == app.selected_table_index {
@@ -1050,6 +1176,19 @@ fn export_file_path(extension: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     std::env::temp_dir().join(format!("myr-export-{timestamp}.{extension}"))
+}
+
+fn block_on_result<T, E, F>(future: F) -> Result<T, String>
+where
+    E: std::fmt::Display,
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to create runtime: {error}"))?;
+
+    runtime.block_on(future).map_err(|error| error.to_string())
 }
 
 fn map_key_event(key: KeyEvent) -> Option<Msg> {

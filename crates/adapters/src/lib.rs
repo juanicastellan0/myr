@@ -1,4 +1,5 @@
 pub mod export;
+pub mod mysql;
 
 #[must_use]
 pub fn adapter_name() -> &'static str {
