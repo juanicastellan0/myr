@@ -17,6 +17,7 @@ use myr_core::actions_engine::{
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore};
 use myr_core::query_runner::QueryRow;
 use myr_core::results_buffer::ResultsRingBuffer;
+use myr_core::safe_mode::{ConfirmationToken, GuardDecision, SafeModeGuard};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -126,6 +127,7 @@ enum Msg {
     NextPane,
     TogglePalette,
     TogglePerfOverlay,
+    ToggleSafeMode,
     Submit,
     CancelQuery,
     Navigate(DirectionKey),
@@ -156,6 +158,8 @@ struct TuiApp {
     should_quit: bool,
     query_running: bool,
     query_ticks_remaining: u8,
+    safe_mode_guard: SafeModeGuard,
+    pending_confirmation: Option<(ConfirmationToken, String)>,
     has_results: bool,
     result_columns: Vec<String>,
     results_cursor: usize,
@@ -191,6 +195,8 @@ impl Default for TuiApp {
             should_quit: false,
             query_running: false,
             query_ticks_remaining: 0,
+            safe_mode_guard: SafeModeGuard::new(true),
+            pending_confirmation: None,
             has_results: false,
             result_columns: vec![
                 "id".to_string(),
@@ -244,6 +250,16 @@ impl TuiApp {
                     "Perf overlay enabled".to_string()
                 } else {
                     "Perf overlay disabled".to_string()
+                };
+            }
+            Msg::ToggleSafeMode => {
+                let next_enabled = !self.safe_mode_guard.is_enabled();
+                self.safe_mode_guard.set_enabled(next_enabled);
+                self.pending_confirmation = None;
+                self.status_line = if next_enabled {
+                    "Safe mode enabled".to_string()
+                } else {
+                    "Safe mode disabled".to_string()
                 };
             }
             Msg::Submit => self.submit(),
@@ -301,6 +317,17 @@ impl TuiApp {
         match self.pane {
             Pane::ConnectionWizard => self.connect_from_wizard(),
             Pane::QueryEditor => {
+                if let Some((token, sql)) = self.pending_confirmation.take() {
+                    match self.safe_mode_guard.confirm(&token, &sql) {
+                        Ok(()) => {
+                            self.start_query(sql);
+                        }
+                        Err(error) => {
+                            self.status_line = format!("Confirmation failed: {error}");
+                        }
+                    }
+                    return;
+                }
                 self.invoke_action(ActionId::RunCurrentQuery);
             }
             Pane::SchemaExplorer | Pane::Results => {
@@ -578,17 +605,33 @@ impl TuiApp {
         }
     }
 
+    fn start_query(&mut self, sql: String) {
+        self.query_running = true;
+        self.query_ticks_remaining = QUERY_DURATION_TICKS;
+        self.cancel_requested = false;
+        self.has_results = false;
+        self.query_editor_text = sql;
+        self.pane = Pane::Results;
+        self.status_line = "Running query...".to_string();
+    }
+
     fn apply_invocation(&mut self, invocation: ActionInvocation) {
         match invocation {
-            ActionInvocation::RunSql(sql) => {
-                self.query_running = true;
-                self.query_ticks_remaining = QUERY_DURATION_TICKS;
-                self.cancel_requested = false;
-                self.has_results = false;
-                self.query_editor_text = sql;
-                self.pane = Pane::Results;
-                self.status_line = "Running query...".to_string();
-            }
+            ActionInvocation::RunSql(sql) => match self.safe_mode_guard.evaluate(&sql) {
+                GuardDecision::Allow { .. } => {
+                    self.pending_confirmation = None;
+                    self.start_query(sql);
+                }
+                GuardDecision::RequireConfirmation { token, assessment } => {
+                    self.pending_confirmation = Some((token, sql.clone()));
+                    self.query_editor_text = sql;
+                    self.pane = Pane::QueryEditor;
+                    self.status_line = format!(
+                        "Safe mode confirmation required: {:?}. Press Enter again to confirm.",
+                        assessment.reasons
+                    );
+                }
+            },
             ActionInvocation::ReplaceQueryEditorText(query) => {
                 self.query_editor_text = query;
                 self.status_line = "Applied LIMIT suggestion".to_string();
@@ -759,10 +802,14 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         Span::raw(" | "),
         Span::raw(format!(
             "SAFE mode: {}",
-            if app.cancel_requested {
-                "cancel requested"
+            if app.safe_mode_guard.is_enabled() {
+                if app.pending_confirmation.is_some() {
+                    "confirming"
+                } else {
+                    "on"
+                }
             } else {
-                "on"
+                "off"
             }
         )),
         Span::raw(" | "),
@@ -926,7 +973,8 @@ fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("Tab: cycle panes"),
         Line::from("Enter: connect or run query (by view)"),
         Line::from("F2: toggle perf overlay"),
-        Line::from("Ctrl+P: command palette placeholder"),
+        Line::from("F3: toggle safe mode"),
+        Line::from("Ctrl+P: command palette"),
         Line::from("Ctrl+C: cancel active query"),
         Line::from("Arrows or hjkl: navigation"),
         Line::from("1..7: invoke ranked action slot"),
@@ -1019,6 +1067,7 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
         KeyCode::Esc => Some(Msg::TogglePalette),
         KeyCode::Tab => Some(Msg::NextPane),
         KeyCode::F(2) => Some(Msg::TogglePerfOverlay),
+        KeyCode::F(3) => Some(Msg::ToggleSafeMode),
         KeyCode::Enter => Some(Msg::Submit),
         KeyCode::Backspace => Some(Msg::Backspace),
         KeyCode::Up | KeyCode::Char('k') => Some(Msg::Navigate(DirectionKey::Up)),
@@ -1081,6 +1130,10 @@ mod tests {
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
             Some(Msg::TogglePerfOverlay)
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
+            Some(Msg::ToggleSafeMode)
         ));
     }
 
