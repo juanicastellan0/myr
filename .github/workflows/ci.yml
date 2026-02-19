@@ -37,6 +37,36 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --all-features
 
+  coverage-gate:
+    name: Coverage gate (llvm-cov)
+    runs-on: ubuntu-latest
+    env:
+      COVERAGE_MIN_LINES: "50"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run coverage with threshold
+        run: |
+          cargo llvm-cov --workspace --all-features \
+            --json --summary-only \
+            --output-path target/coverage/summary.json \
+            --fail-under-lines "$COVERAGE_MIN_LINES"
+
+      - name: Print coverage summary
+        run: cargo llvm-cov report --summary-only
+
   perf-smoke:
     name: Perf smoke (MySQL benchmark)
     runs-on: ubuntu-latest
