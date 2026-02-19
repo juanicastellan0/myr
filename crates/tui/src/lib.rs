@@ -169,6 +169,7 @@ enum DirectionKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Msg {
     Quit,
+    GoConnectionWizard,
     ToggleHelp,
     NextPane,
     TogglePalette,
@@ -323,6 +324,14 @@ impl TuiApp {
     fn handle(&mut self, msg: Msg) {
         match msg {
             Msg::Quit => self.should_quit = true,
+            Msg::GoConnectionWizard => {
+                self.pane = Pane::ConnectionWizard;
+                if self.wizard_form.editing {
+                    self.cancel_wizard_edit();
+                } else {
+                    self.status_line = "Returned to Connection Wizard".to_string();
+                }
+            }
             Msg::ToggleHelp => self.show_help = !self.show_help,
             Msg::NextPane => {
                 if self.pane == Pane::ConnectionWizard && self.wizard_form.editing {
@@ -470,8 +479,6 @@ impl TuiApp {
                     self.wizard_form.host, self.wizard_form.port, self.wizard_form.user
                 );
             }
-        } else if self.pane == Pane::QueryEditor {
-            self.submit();
         } else {
             self.status_line = "Connect is only available in connection wizard".to_string();
         }
@@ -1762,6 +1769,7 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             Line::from("Query Editor"),
             Line::from(app.query_editor_text.as_str()),
             Line::from("Enter to run query, 1..7 for ranked actions."),
+            Line::from("Tab: next pane | F6: connection wizard"),
             Line::from("Ctrl+P opens palette placeholder."),
         ],
     };
@@ -1809,6 +1817,7 @@ fn render_help_popup(frame: &mut Frame<'_>) {
     let help = Paragraph::new(vec![
         Line::from("Global keymap"),
         Line::from("F10: quit"),
+        Line::from("F6: go to connection wizard"),
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
         Line::from("Connection wizard: E/Enter edit, F5 connect"),
@@ -1996,6 +2005,7 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
         KeyCode::Esc => Some(Msg::TogglePalette),
         KeyCode::Tab => Some(Msg::NextPane),
         KeyCode::F(5) => Some(Msg::Connect),
+        KeyCode::F(6) => Some(Msg::GoConnectionWizard),
         KeyCode::F(10) => Some(Msg::Quit),
         KeyCode::F(2) => Some(Msg::TogglePerfOverlay),
         KeyCode::F(3) => Some(Msg::ToggleSafeMode),
@@ -2100,6 +2110,10 @@ mod tests {
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
             Some(Msg::Connect)
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Some(Msg::GoConnectionWizard)
         ));
         assert!(map_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)).is_none());
         assert!(matches!(
@@ -2564,5 +2578,29 @@ mod tests {
         app.on_tick();
         assert!(!app.connect_requested);
         assert_eq!(app.status_line, "Invalid port in connection wizard");
+    }
+
+    #[test]
+    fn connect_message_in_query_editor_does_not_run_query() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+        app.query_editor_text = "SELECT 1".to_string();
+
+        app.handle(Msg::Connect);
+
+        assert!(!app.query_running);
+        assert_eq!(
+            app.status_line,
+            "Connect is only available in connection wizard"
+        );
+    }
+
+    #[test]
+    fn go_connection_wizard_switches_from_any_pane() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+
+        app.handle(Msg::GoConnectionWizard);
+
+        assert_eq!(app.pane, Pane::ConnectionWizard);
+        assert_eq!(app.status_line, "Returned to Connection Wizard");
     }
 }
