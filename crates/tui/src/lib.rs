@@ -125,6 +125,7 @@ enum Msg {
     ToggleHelp,
     NextPane,
     TogglePalette,
+    TogglePerfOverlay,
     Submit,
     CancelQuery,
     Navigate(DirectionKey),
@@ -146,6 +147,12 @@ struct TuiApp {
     show_palette: bool,
     palette_query: String,
     palette_selection: usize,
+    show_perf_overlay: bool,
+    last_render_ms: f64,
+    recent_render_total_ms: f64,
+    recent_render_count: u32,
+    fps: f64,
+    fps_window_started_at: Instant,
     should_quit: bool,
     query_running: bool,
     query_ticks_remaining: u8,
@@ -175,6 +182,12 @@ impl Default for TuiApp {
             show_palette: false,
             palette_query: String::new(),
             palette_selection: 0,
+            show_perf_overlay: false,
+            last_render_ms: 0.0,
+            recent_render_total_ms: 0.0,
+            recent_render_count: 0,
+            fps: 0.0,
+            fps_window_started_at: Instant::now(),
             should_quit: false,
             query_running: false,
             query_ticks_remaining: 0,
@@ -225,6 +238,14 @@ impl TuiApp {
                     "Command palette closed".to_string()
                 };
             }
+            Msg::TogglePerfOverlay => {
+                self.show_perf_overlay = !self.show_perf_overlay;
+                self.status_line = if self.show_perf_overlay {
+                    "Perf overlay enabled".to_string()
+                } else {
+                    "Perf overlay disabled".to_string()
+                };
+            }
             Msg::Submit => self.submit(),
             Msg::CancelQuery => {
                 self.cancel_requested = true;
@@ -249,6 +270,20 @@ impl TuiApp {
             } else {
                 self.query_ticks_remaining = self.query_ticks_remaining.saturating_sub(1);
             }
+        }
+    }
+
+    fn record_render(&mut self, elapsed: Duration) {
+        self.last_render_ms = elapsed.as_secs_f64() * 1_000.0;
+        self.recent_render_total_ms += self.last_render_ms;
+        self.recent_render_count = self.recent_render_count.saturating_add(1);
+
+        let window_elapsed = self.fps_window_started_at.elapsed();
+        if window_elapsed >= Duration::from_secs(1) {
+            self.fps = f64::from(self.recent_render_count) / window_elapsed.as_secs_f64();
+            self.recent_render_total_ms = 0.0;
+            self.recent_render_count = 0;
+            self.fps_window_started_at = Instant::now();
         }
     }
 
@@ -664,7 +699,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Tui
     let mut last_tick = Instant::now();
 
     loop {
+        let render_started = Instant::now();
         terminal.draw(|frame| render(frame, &app))?;
+        app.record_render(render_started.elapsed());
 
         let timeout = TICK_RATE
             .checked_sub(last_tick.elapsed())
@@ -738,6 +775,17 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             "Palette: {}",
             if app.show_palette { "open" } else { "closed" }
         )),
+        Span::raw(" | "),
+        Span::raw(if app.show_perf_overlay {
+            format!(
+                "Perf: {:.1}ms {:.1}fps rows:{}",
+                app.last_render_ms,
+                app.fps,
+                app.results.len()
+            )
+        } else {
+            "Perf: off (F2)".to_string()
+        }),
     ]))
     .block(
         Block::default()
@@ -877,6 +925,7 @@ fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
         Line::from("Enter: connect or run query (by view)"),
+        Line::from("F2: toggle perf overlay"),
         Line::from("Ctrl+P: command palette placeholder"),
         Line::from("Ctrl+C: cancel active query"),
         Line::from("Arrows or hjkl: navigation"),
@@ -969,6 +1018,7 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('?') => Some(Msg::ToggleHelp),
         KeyCode::Esc => Some(Msg::TogglePalette),
         KeyCode::Tab => Some(Msg::NextPane),
+        KeyCode::F(2) => Some(Msg::TogglePerfOverlay),
         KeyCode::Enter => Some(Msg::Submit),
         KeyCode::Backspace => Some(Msg::Backspace),
         KeyCode::Up | KeyCode::Char('k') => Some(Msg::Navigate(DirectionKey::Up)),
@@ -1027,6 +1077,10 @@ mod tests {
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(Msg::Submit)
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            Some(Msg::TogglePerfOverlay)
         ));
     }
 

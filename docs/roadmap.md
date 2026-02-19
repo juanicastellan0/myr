@@ -24,7 +24,7 @@
 ## M3: Big-table competence
 
 - [ ] Pagination strategy (keyset + fallback)
-- [ ] Performance instrumentation overlay
+- [x] Performance instrumentation overlay
 - [ ] Benchmark scripts and regression checks
 
 ## M4: Stable release
