@@ -138,6 +138,8 @@ struct ConnectionWizardForm {
     user: String,
     database: String,
     active_field: WizardField,
+    editing: bool,
+    edit_buffer: String,
 }
 
 impl Default for ConnectionWizardForm {
@@ -149,6 +151,8 @@ impl Default for ConnectionWizardForm {
             user: "root".to_string(),
             database: "app".to_string(),
             active_field: WizardField::ProfileName,
+            editing: false,
+            edit_buffer: String::new(),
         }
     }
 }
@@ -175,6 +179,8 @@ enum Msg {
     InvokeActionSlot(usize),
     InputChar(char),
     Backspace,
+    ClearInput,
+    Connect,
     Tick,
 }
 
@@ -299,7 +305,8 @@ impl Default for TuiApp {
             pagination_state: None,
             pending_page_transition: None,
             cancel_requested: false,
-            status_line: "Fill connection details and press Enter to connect".to_string(),
+            status_line: "Select a field with Up/Down, press E to edit, Ctrl+S to connect"
+                .to_string(),
             query_editor_text: "SELECT * FROM `users`".to_string(),
             selection: SchemaSelection {
                 database: Some("app".to_string()),
@@ -316,16 +323,19 @@ impl TuiApp {
             Msg::Quit => self.should_quit = true,
             Msg::ToggleHelp => self.show_help = !self.show_help,
             Msg::NextPane => {
-                if self.pane == Pane::ConnectionWizard {
-                    self.wizard_form.active_field = self.wizard_form.active_field.next();
+                if self.pane == Pane::ConnectionWizard && self.wizard_form.editing {
                     self.status_line =
-                        format!("Wizard field: {}", self.wizard_form.active_field.label());
+                        "Finish editing field first (Enter to save, Esc to cancel)".to_string();
                 } else {
                     self.pane = self.pane.next();
                     self.status_line = format!("Switched pane to {}", self.pane_name());
                 }
             }
             Msg::TogglePalette => {
+                if self.pane == Pane::ConnectionWizard && self.wizard_form.editing {
+                    self.cancel_wizard_edit();
+                    return;
+                }
                 self.show_palette = !self.show_palette;
                 if self.show_palette {
                     self.palette_query.clear();
@@ -356,6 +366,7 @@ impl TuiApp {
                 };
             }
             Msg::Submit => self.submit(),
+            Msg::Connect => self.connect(),
             Msg::CancelQuery => {
                 self.cancel_requested = true;
                 self.query_running = false;
@@ -366,6 +377,7 @@ impl TuiApp {
             Msg::InvokeActionSlot(index) => self.invoke_ranked_action(index),
             Msg::InputChar(ch) => self.handle_input_char(ch),
             Msg::Backspace => self.handle_backspace(),
+            Msg::ClearInput => self.handle_clear_input(),
             Msg::Tick => self.on_tick(),
         }
     }
@@ -409,7 +421,13 @@ impl TuiApp {
         }
 
         match self.pane {
-            Pane::ConnectionWizard => self.connect_from_wizard(),
+            Pane::ConnectionWizard => {
+                if self.wizard_form.editing {
+                    self.commit_wizard_edit();
+                } else {
+                    self.start_wizard_edit();
+                }
+            }
             Pane::QueryEditor => {
                 if let Some((token, sql)) = self.pending_confirmation.take() {
                     match self.safe_mode_guard.confirm(&token, &sql) {
@@ -427,6 +445,19 @@ impl TuiApp {
             Pane::SchemaExplorer | Pane::Results => {
                 self.status_line = "Nothing to submit in this view".to_string();
             }
+        }
+    }
+
+    fn connect(&mut self) {
+        if self.pane == Pane::ConnectionWizard {
+            if self.wizard_form.editing {
+                self.commit_wizard_edit();
+            }
+            self.connect_from_wizard();
+        } else if self.pane == Pane::QueryEditor {
+            self.submit();
+        } else {
+            self.status_line = "Connect is only available in connection wizard".to_string();
         }
     }
 
@@ -538,13 +569,26 @@ impl TuiApp {
 
         match self.pane {
             Pane::ConnectionWizard => {
-                if matches!(direction, DirectionKey::Left | DirectionKey::Up) {
-                    self.wizard_form.active_field = self.previous_wizard_field();
-                } else {
-                    self.wizard_form.active_field = self.wizard_form.active_field.next();
+                if self.wizard_form.editing {
+                    self.status_line =
+                        "Finish editing field first (Enter to save, Esc to cancel)".to_string();
+                    return;
                 }
-                self.status_line =
-                    format!("Wizard field: {}", self.wizard_form.active_field.label());
+                match direction {
+                    DirectionKey::Up => {
+                        self.wizard_form.active_field = self.previous_wizard_field();
+                        self.status_line =
+                            format!("Wizard field: {}", self.wizard_form.active_field.label());
+                    }
+                    DirectionKey::Down => {
+                        self.wizard_form.active_field = self.wizard_form.active_field.next();
+                        self.status_line =
+                            format!("Wizard field: {}", self.wizard_form.active_field.label());
+                    }
+                    DirectionKey::Left | DirectionKey::Right => {
+                        self.status_line = "Use Up/Down to select a wizard field".to_string();
+                    }
+                }
             }
             Pane::SchemaExplorer => self.navigate_schema(direction),
             Pane::Results => self.navigate_results(direction),
@@ -868,8 +912,19 @@ impl TuiApp {
             self.palette_selection = 0;
             self.status_line = format!("Palette query: {}", self.palette_query);
         } else if self.pane == Pane::ConnectionWizard {
-            self.active_wizard_value_mut().push(ch);
-            self.status_line = format!("Updated {}", self.wizard_form.active_field.label());
+            if !self.wizard_form.editing {
+                if ch.eq_ignore_ascii_case(&'e') {
+                    self.start_wizard_edit();
+                } else {
+                    self.status_line = format!(
+                        "Selected {}. Press E or Enter to edit",
+                        self.wizard_form.active_field.label()
+                    );
+                }
+            } else {
+                self.wizard_form.edit_buffer.push(ch);
+                self.status_line = format!("Editing {}", self.wizard_form.active_field.label());
+            }
         } else if self.pane == Pane::QueryEditor {
             self.query_editor_text.push(ch);
             self.status_line = "Query text updated".to_string();
@@ -882,11 +937,82 @@ impl TuiApp {
             self.palette_selection = 0;
             self.status_line = format!("Palette query: {}", self.palette_query);
         } else if self.pane == Pane::ConnectionWizard {
-            self.active_wizard_value_mut().pop();
-            self.status_line = format!("Updated {}", self.wizard_form.active_field.label());
+            if self.wizard_form.editing {
+                self.wizard_form.edit_buffer.pop();
+                self.status_line = format!("Editing {}", self.wizard_form.active_field.label());
+            } else {
+                self.status_line = format!(
+                    "Selected {}. Press E or Enter to edit",
+                    self.wizard_form.active_field.label()
+                );
+            }
         } else if self.pane == Pane::QueryEditor {
             self.query_editor_text.pop();
             self.status_line = "Query text updated".to_string();
+        }
+    }
+
+    fn handle_clear_input(&mut self) {
+        if self.show_palette {
+            self.palette_query.clear();
+            self.palette_selection = 0;
+            self.status_line = "Palette query cleared".to_string();
+        } else if self.pane == Pane::ConnectionWizard {
+            if self.wizard_form.editing {
+                self.wizard_form.edit_buffer.clear();
+                self.status_line = format!("Cleared {}", self.wizard_form.active_field.label());
+            } else {
+                self.status_line = format!(
+                    "Selected {}. Press E or Enter to edit",
+                    self.wizard_form.active_field.label()
+                );
+            }
+        } else if self.pane == Pane::QueryEditor {
+            self.query_editor_text.clear();
+            self.status_line = "Query cleared".to_string();
+        }
+    }
+
+    fn start_wizard_edit(&mut self) {
+        if self.pane != Pane::ConnectionWizard || self.wizard_form.editing {
+            return;
+        }
+        let current_value = self.active_wizard_value().to_string();
+        self.wizard_form.editing = true;
+        self.wizard_form.edit_buffer = current_value;
+        self.status_line = format!(
+            "Editing {} (Enter save, Esc cancel, Ctrl+U clear)",
+            self.wizard_form.active_field.label()
+        );
+    }
+
+    fn commit_wizard_edit(&mut self) {
+        if self.pane != Pane::ConnectionWizard || !self.wizard_form.editing {
+            return;
+        }
+        let updated_value = self.wizard_form.edit_buffer.clone();
+        *self.active_wizard_value_mut() = updated_value;
+        self.wizard_form.editing = false;
+        self.wizard_form.edit_buffer.clear();
+        self.status_line = format!("Saved {}", self.wizard_form.active_field.label());
+    }
+
+    fn cancel_wizard_edit(&mut self) {
+        if self.pane != Pane::ConnectionWizard || !self.wizard_form.editing {
+            return;
+        }
+        self.wizard_form.editing = false;
+        self.wizard_form.edit_buffer.clear();
+        self.status_line = format!("Canceled editing {}", self.wizard_form.active_field.label());
+    }
+
+    fn active_wizard_value(&self) -> &str {
+        match self.wizard_form.active_field {
+            WizardField::ProfileName => self.wizard_form.profile_name.as_str(),
+            WizardField::Host => self.wizard_form.host.as_str(),
+            WizardField::Port => self.wizard_form.port.as_str(),
+            WizardField::User => self.wizard_form.user.as_str(),
+            WizardField::Database => self.wizard_form.database.as_str(),
         }
     }
 
@@ -901,6 +1027,20 @@ impl TuiApp {
     }
 
     fn invoke_ranked_action(&mut self, index: usize) {
+        if self.pane == Pane::ConnectionWizard {
+            if self.wizard_form.editing {
+                let digit = char::from_digit((index + 1) as u32, 10).unwrap_or('0');
+                self.wizard_form.edit_buffer.push(digit);
+                self.status_line = format!("Editing {}", self.wizard_form.active_field.label());
+            } else {
+                self.status_line = format!(
+                    "Selected {}. Press E or Enter to edit",
+                    self.wizard_form.active_field.label()
+                );
+            }
+            return;
+        }
+
         if self.show_palette {
             self.palette_selection = index.min(self.palette_entries().len().saturating_sub(1));
             self.submit();
@@ -1442,8 +1582,9 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
 
             let mut lines = vec![
                 Line::from("Connection Wizard"),
-                Line::from("Enter: connect and save profile"),
-                Line::from("Tab / arrows: switch field"),
+                Line::from("Up/Down: select field"),
+                Line::from("E or Enter: edit field | Enter: save field"),
+                Line::from("Esc: cancel edit | Ctrl+U: clear field | Ctrl+S: connect"),
                 Line::from(""),
             ];
             for (field, label, value) in fields {
@@ -1452,7 +1593,37 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 } else {
                     " "
                 };
-                lines.push(Line::from(format!("{marker} {label}: {value}")));
+                let editing_active =
+                    app.wizard_form.editing && app.wizard_form.active_field == field;
+                let active = app.wizard_form.active_field == field;
+                let display_label = if editing_active {
+                    format!("{label} [EDIT]")
+                } else {
+                    label.to_string()
+                };
+                let display_value = if editing_active {
+                    app.wizard_form.edit_buffer.as_str()
+                } else {
+                    value
+                };
+                let line = format!("{marker} {display_label}: {display_value}");
+                if editing_active {
+                    lines.push(Line::from(Span::styled(
+                        line,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                } else if active {
+                    lines.push(Line::from(Span::styled(
+                        line,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                } else {
+                    lines.push(Line::from(line));
+                }
             }
             lines
         }
@@ -1612,10 +1783,12 @@ fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("Ctrl+Q: quit"),
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
-        Line::from("Enter: connect or run query (by view)"),
+        Line::from("Connection wizard: E/Enter edit, Ctrl+S connect"),
+        Line::from("Enter: run query (Query Editor)"),
         Line::from("F2: toggle perf overlay"),
         Line::from("F3: toggle safe mode"),
         Line::from("Ctrl+P: command palette"),
+        Line::from("Ctrl+U: clear current input"),
         Line::from("Ctrl+C: cancel active query"),
         Line::from("Arrows or hjkl: navigation"),
         Line::from("1..7: invoke ranked action slot"),
@@ -1753,7 +1926,9 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
     if key.modifiers == KeyModifiers::CONTROL {
         return match key.code {
             KeyCode::Char('q') => Some(Msg::Quit),
+            KeyCode::Char('s') => Some(Msg::Connect),
             KeyCode::Char('p') => Some(Msg::TogglePalette),
+            KeyCode::Char('u') => Some(Msg::ClearInput),
             KeyCode::Char('c') => Some(Msg::CancelQuery),
             _ => None,
         };
@@ -1846,6 +2021,14 @@ mod tests {
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
             Some(Msg::TogglePalette)
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(Msg::Connect)
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            Some(Msg::ClearInput)
         ));
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -2001,11 +2184,13 @@ mod tests {
         app.wizard_form.active_field = WizardField::Host;
         app.wizard_form.host.clear();
 
+        app.handle(Msg::Submit);
         app.handle(Msg::InputChar('d'));
         app.handle(Msg::InputChar('b'));
+        app.handle(Msg::Submit);
 
         assert_eq!(app.wizard_form.host, "db");
-        assert_eq!(app.status_line, "Updated Host");
+        assert_eq!(app.status_line, "Saved Host");
     }
 
     #[test]
@@ -2014,10 +2199,55 @@ mod tests {
         app.wizard_form.active_field = WizardField::Database;
         app.wizard_form.database = "Rfam".to_string();
 
+        app.handle(Msg::Submit);
         app.handle(Msg::Backspace);
+        app.handle(Msg::Submit);
 
         assert_eq!(app.wizard_form.database, "Rfa");
-        assert_eq!(app.status_line, "Updated Database");
+        assert_eq!(app.status_line, "Saved Database");
+    }
+
+    #[test]
+    fn wizard_escape_cancels_edit_without_mutation() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.active_field = WizardField::Database;
+        app.wizard_form.database = "Rfam".to_string();
+
+        app.handle(Msg::Submit);
+        app.handle(Msg::Backspace);
+        app.handle(Msg::TogglePalette);
+
+        assert_eq!(app.wizard_form.database, "Rfam");
+        assert!(!app.wizard_form.editing);
+        assert!(!app.show_palette);
+        assert_eq!(app.status_line, "Canceled editing Database");
+    }
+
+    #[test]
+    fn wizard_ctrl_u_clears_edit_buffer() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.active_field = WizardField::Host;
+        app.wizard_form.host = "mysql.example.com".to_string();
+
+        app.handle(Msg::Submit);
+        app.handle(Msg::ClearInput);
+
+        assert!(app.wizard_form.edit_buffer.is_empty());
+        assert_eq!(app.status_line, "Cleared Host");
+    }
+
+    #[test]
+    fn wizard_digit_slots_input_numbers_while_editing() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.active_field = WizardField::Port;
+        app.wizard_form.port.clear();
+
+        app.handle(Msg::Submit);
+        app.handle(Msg::InvokeActionSlot(2));
+        app.handle(Msg::InvokeActionSlot(0));
+        app.handle(Msg::Submit);
+
+        assert_eq!(app.wizard_form.port, "31");
     }
 
     #[test]
