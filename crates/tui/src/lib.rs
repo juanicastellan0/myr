@@ -1609,7 +1609,7 @@ fn render_help_popup(frame: &mut Frame<'_>) {
     frame.render_widget(Clear, area);
     let help = Paragraph::new(vec![
         Line::from("Global keymap"),
-        Line::from("q: quit"),
+        Line::from("Ctrl+Q: quit"),
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
         Line::from("Enter: connect or run query (by view)"),
@@ -1752,6 +1752,7 @@ where
 fn map_key_event(key: KeyEvent) -> Option<Msg> {
     if key.modifiers == KeyModifiers::CONTROL {
         return match key.code {
+            KeyCode::Char('q') => Some(Msg::Quit),
             KeyCode::Char('p') => Some(Msg::TogglePalette),
             KeyCode::Char('c') => Some(Msg::CancelQuery),
             _ => None,
@@ -1759,7 +1760,6 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
     }
 
     match key.code {
-        KeyCode::Char('q') => Some(Msg::Quit),
         KeyCode::Char('?') => Some(Msg::ToggleHelp),
         KeyCode::Esc => Some(Msg::TogglePalette),
         KeyCode::Tab => Some(Msg::NextPane),
@@ -1832,8 +1832,12 @@ mod tests {
     #[test]
     fn keymap_supports_required_global_keys() {
         assert!(matches!(
-            map_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            map_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
             Some(Msg::Quit)
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(Msg::InputChar('q'))
         ));
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
