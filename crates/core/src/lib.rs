@@ -3,6 +3,7 @@ pub mod profiles;
 pub mod query_runner;
 pub mod results_buffer;
 pub mod schema_cache;
+pub mod sql_generator;
 
 #[must_use]
 pub fn domain_name() -> &'static str {
