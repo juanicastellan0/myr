@@ -867,6 +867,9 @@ impl TuiApp {
             self.palette_query.push(ch);
             self.palette_selection = 0;
             self.status_line = format!("Palette query: {}", self.palette_query);
+        } else if self.pane == Pane::ConnectionWizard {
+            self.active_wizard_value_mut().push(ch);
+            self.status_line = format!("Updated {}", self.wizard_form.active_field.label());
         } else if self.pane == Pane::QueryEditor {
             self.query_editor_text.push(ch);
             self.status_line = "Query text updated".to_string();
@@ -878,9 +881,22 @@ impl TuiApp {
             self.palette_query.pop();
             self.palette_selection = 0;
             self.status_line = format!("Palette query: {}", self.palette_query);
+        } else if self.pane == Pane::ConnectionWizard {
+            self.active_wizard_value_mut().pop();
+            self.status_line = format!("Updated {}", self.wizard_form.active_field.label());
         } else if self.pane == Pane::QueryEditor {
             self.query_editor_text.pop();
             self.status_line = "Query text updated".to_string();
+        }
+    }
+
+    fn active_wizard_value_mut(&mut self) -> &mut String {
+        match self.wizard_form.active_field {
+            WizardField::ProfileName => &mut self.wizard_form.profile_name,
+            WizardField::Host => &mut self.wizard_form.host,
+            WizardField::Port => &mut self.wizard_form.port,
+            WizardField::User => &mut self.wizard_form.user,
+            WizardField::Database => &mut self.wizard_form.database,
         }
     }
 
@@ -1782,7 +1798,7 @@ mod tests {
     use super::{
         candidate_key_column, centered_rect, extract_key_bounds, map_key_event, quote_identifier,
         render, suggest_limit_in_editor, ActionId, ActionInvocation, AppView, DirectionKey, Msg,
-        PaginationPlan, Pane, QueryRow, ResultsRingBuffer, SchemaLane, TuiApp,
+        PaginationPlan, Pane, QueryRow, ResultsRingBuffer, SchemaLane, TuiApp, WizardField,
         QUERY_DURATION_TICKS,
     };
 
@@ -1973,6 +1989,31 @@ mod tests {
         app.connect_from_wizard();
 
         assert_eq!(app.status_line, "Invalid port in connection wizard");
+    }
+
+    #[test]
+    fn wizard_input_updates_active_field() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.active_field = WizardField::Host;
+        app.wizard_form.host.clear();
+
+        app.handle(Msg::InputChar('d'));
+        app.handle(Msg::InputChar('b'));
+
+        assert_eq!(app.wizard_form.host, "db");
+        assert_eq!(app.status_line, "Updated Host");
+    }
+
+    #[test]
+    fn wizard_backspace_updates_active_field() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.active_field = WizardField::Database;
+        app.wizard_form.database = "Rfam".to_string();
+
+        app.handle(Msg::Backspace);
+
+        assert_eq!(app.wizard_form.database, "Rfa");
+        assert_eq!(app.status_line, "Updated Database");
     }
 
     #[test]
