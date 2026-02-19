@@ -37,6 +37,7 @@ const QUERY_DURATION_TICKS: u8 = 10;
 const FOOTER_ACTIONS_LIMIT: usize = 7;
 const RESULT_BUFFER_CAPACITY: usize = 2_000;
 const PREVIEW_PAGE_SIZE: usize = 200;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
 const DEMO_SCHEMA_COLUMNS: [&str; 4] = ["id", "email", "created_at", "updated_at"];
@@ -250,6 +251,7 @@ struct TuiApp {
     pagination_state: Option<PaginationState>,
     pending_page_transition: Option<PageTransition>,
     cancel_requested: bool,
+    connect_requested: bool,
     status_line: String,
     query_editor_text: String,
     selection: SchemaSelection,
@@ -305,6 +307,7 @@ impl Default for TuiApp {
             pagination_state: None,
             pending_page_transition: None,
             cancel_requested: false,
+            connect_requested: false,
             status_line: "Select a field with Up/Down, press E to edit, F5 to connect".to_string(),
             query_editor_text: "SELECT * FROM `users`".to_string(),
             selection: SchemaSelection {
@@ -382,6 +385,12 @@ impl TuiApp {
     }
 
     fn on_tick(&mut self) {
+        if self.connect_requested {
+            self.connect_requested = false;
+            self.connect_from_wizard();
+            return;
+        }
+
         if self.query_running && self.data_backend.is_none() {
             if self.query_ticks_remaining == 0 {
                 self.query_running = false;
@@ -452,7 +461,15 @@ impl TuiApp {
             if self.wizard_form.editing {
                 self.commit_wizard_edit();
             }
-            self.connect_from_wizard();
+            if self.connect_requested {
+                self.status_line = "Already connecting...".to_string();
+            } else {
+                self.connect_requested = true;
+                self.status_line = format!(
+                    "Connecting to {}:{} as {}...",
+                    self.wizard_form.host, self.wizard_form.port, self.wizard_form.user
+                );
+            }
         } else if self.pane == Pane::QueryEditor {
             self.submit();
         } else {
@@ -483,7 +500,11 @@ impl TuiApp {
 
         let connection_backend = MysqlConnectionBackend;
         let mut manager = ConnectionManager::new(connection_backend);
-        let connect_latency = match block_on_result(manager.connect(profile.clone())) {
+        let connect_latency = match block_on_timeout_result(
+            manager.connect(profile.clone()),
+            CONNECT_TIMEOUT,
+            "connect",
+        ) {
             Ok(latency) => latency,
             Err(error) => {
                 self.status_line = format!("Connect failed: {error}");
@@ -494,7 +515,11 @@ impl TuiApp {
         let data_backend = MysqlDataBackend::from_profile(&profile);
         let mut schema_cache =
             SchemaCacheService::new(data_backend.clone(), Duration::from_secs(10));
-        let databases = match block_on_result(schema_cache.list_databases()) {
+        let databases = match block_on_timeout_result(
+            schema_cache.list_databases(),
+            CONNECT_TIMEOUT,
+            "schema fetch",
+        ) {
             Ok(databases) => databases,
             Err(error) => {
                 self.status_line = format!("Connected, but schema fetch failed: {error}");
@@ -1746,18 +1771,22 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         .alignment(Alignment::Left);
     frame.render_widget(body, chunks[1]);
 
-    let actions = app
-        .actions
-        .rank_top_n(&app.action_context(), FOOTER_ACTIONS_LIMIT);
-    let footer_line = if actions.is_empty() {
-        "No available actions in this context".to_string()
+    let footer_line = if app.pane == Pane::ConnectionWizard {
+        "F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit".to_string()
     } else {
-        actions
-            .iter()
-            .enumerate()
-            .map(|(index, action)| format!("{}:{} ", index + 1, action.title))
-            .collect::<Vec<_>>()
-            .join("| ")
+        let actions = app
+            .actions
+            .rank_top_n(&app.action_context(), FOOTER_ACTIONS_LIMIT);
+        if actions.is_empty() {
+            "No available actions in this context".to_string()
+        } else {
+            actions
+                .iter()
+                .enumerate()
+                .map(|(index, action)| format!("{}:{} ", index + 1, action.title))
+                .collect::<Vec<_>>()
+                .join("| ")
+        }
     };
     let footer = Paragraph::new(vec![
         Line::from(footer_line),
@@ -1921,6 +1950,27 @@ where
     runtime.block_on(future).map_err(|error| error.to_string())
 }
 
+fn block_on_timeout_result<T, E, F>(
+    future: F,
+    timeout: Duration,
+    operation_name: &str,
+) -> Result<T, String>
+where
+    E: std::fmt::Display,
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to create runtime: {error}"))?;
+
+    let result = runtime
+        .block_on(async { tokio::time::timeout(timeout, future).await })
+        .map_err(|_| format!("{operation_name} timed out after {:.1?}", timeout))?;
+
+    result.map_err(|error| error.to_string())
+}
+
 fn map_key_event(key: KeyEvent) -> Option<Msg> {
     if key.modifiers == KeyModifiers::CONTROL {
         return match key.code {
@@ -2051,10 +2101,7 @@ mod tests {
             map_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
             Some(Msg::Connect)
         ));
-        assert!(matches!(
-            map_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-            None
-        ));
+        assert!(map_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)).is_none());
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
             Some(Msg::ClearInput)
@@ -2503,5 +2550,19 @@ mod tests {
 
         app.connect_from_wizard();
         assert!(app.status_line.starts_with("Connect failed:"));
+    }
+
+    #[test]
+    fn connect_message_queues_request_and_tick_executes_it() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.port = "not-a-port".to_string();
+
+        app.handle(Msg::Connect);
+        assert!(app.connect_requested);
+        assert!(app.status_line.starts_with("Connecting to "));
+
+        app.on_tick();
+        assert!(!app.connect_requested);
+        assert_eq!(app.status_line, "Invalid port in connection wizard");
     }
 }
