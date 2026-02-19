@@ -71,8 +71,16 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux-x86_64
+            archive_ext: tar.gz
           - os: macos-13
             platform: macos-x86_64
+            archive_ext: tar.gz
+          - os: windows-latest
+            platform: windows-x86_64
+            archive_ext: zip
+    env:
+      ARCHIVE_ROOT: ${{ env.BIN_NAME }}-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}
+      ARCHIVE_NAME: ${{ env.BIN_NAME }}-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,28 +92,33 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --locked --release -p myr-app --bin "${BIN_NAME}"
+        run: cargo build --locked --release -p myr-app --bin myr-app
 
-      - name: Package artifact
-        id: package
+      - name: Package artifact (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          archive_root="${BIN_NAME}-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}"
-          archive_name="${archive_root}.tar.gz"
+          mkdir -p "dist/${ARCHIVE_ROOT}"
+          cp "target/release/${BIN_NAME}" "dist/${ARCHIVE_ROOT}/${BIN_NAME}"
+          cp README.md LICENSE "dist/${ARCHIVE_ROOT}/"
+          tar -czf "${ARCHIVE_NAME}" -C dist "${ARCHIVE_ROOT}"
 
-          mkdir -p "dist/${archive_root}"
-          cp "target/release/${BIN_NAME}" "dist/${archive_root}/${BIN_NAME}"
-          cp README.md LICENSE "dist/${archive_root}/"
-          tar -czf "${archive_name}" -C dist "${archive_root}"
-
-          echo "archive_name=${archive_name}" >> "${GITHUB_OUTPUT}"
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "dist/$env:ARCHIVE_ROOT" | Out-Null
+          Copy-Item "target/release/$env:BIN_NAME.exe" "dist/$env:ARCHIVE_ROOT/$env:BIN_NAME.exe"
+          Copy-Item "README.md","LICENSE" "dist/$env:ARCHIVE_ROOT/"
+          Compress-Archive -Path "dist/$env:ARCHIVE_ROOT/*" -DestinationPath "$env:ARCHIVE_NAME" -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform }}
-          path: ${{ steps.package.outputs.archive_name }}
+          path: ${{ env.ARCHIVE_NAME }}
           if-no-files-found: error
 
   publish:
@@ -127,7 +140,13 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          sha256sum *.tar.gz > SHA256SUMS.txt
+          shopt -s nullglob
+          files=( *.tar.gz *.zip )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release archives found."
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS.txt
 
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2
@@ -138,4 +157,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             artifacts/*.tar.gz
+            artifacts/*.zip
             artifacts/SHA256SUMS.txt

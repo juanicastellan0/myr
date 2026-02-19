@@ -64,6 +64,8 @@ and benchmark/coverage gates. The detailed product backlog is in
   - minimum lines: `80%`
   - MySQL-backed integration tests enabled via `MYR_RUN_MYSQL_INTEGRATION=1`
   - see `.github/workflows/ci.yml`
+- CI cross-platform validation:
+  - test + build on `ubuntu-latest`, `macos-latest`, and `windows-latest`
 - Run MySQL integration tests locally (optional):
   - `MYR_DB_PASSWORD=root MYR_RUN_MYSQL_INTEGRATION=1 cargo test -p myr-adapters --test mysql_integration`
 - Additional quality docs:

@@ -34,12 +34,13 @@ git push origin v0.1.0
 - Produces archives for:
   - `linux-x86_64`
   - `macos-x86_64`
+  - `windows-x86_64`
 - Packages each archive with:
-  - `myr-app`
+  - `myr-app` / `myr-app.exe` (Windows)
   - `README.md`
   - `LICENSE`
 - Publishes a GitHub Release with generated notes and:
-  - `*.tar.gz` artifacts
+  - `*.tar.gz` and `*.zip` artifacts
   - `SHA256SUMS.txt`
 
 ## If a Release Fails

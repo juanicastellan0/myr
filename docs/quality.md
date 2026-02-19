@@ -36,6 +36,10 @@ Current gate settings:
 - MySQL integration coverage enabled with:
   - `MYR_DB_PASSWORD=root`
   - `MYR_RUN_MYSQL_INTEGRATION=1`
+- cross-platform validation:
+  - `cargo test --workspace --all-features --locked`
+  - `cargo build --workspace --all-features --locked`
+  - runs on `ubuntu-latest`, `macos-latest`, and `windows-latest`
 - command:
 
 ```bash

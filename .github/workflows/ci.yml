@@ -125,8 +125,8 @@ jobs:
             --assert-first-row-ms 5000 \
             --assert-min-rows-per-sec 500
 
-  build:
-    name: Build (${{ matrix.os }})
+  cross-platform:
+    name: Cross-platform validation (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -134,6 +134,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
+          - windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -144,5 +145,8 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Run tests
+        run: cargo test --workspace --all-features --locked
+
       - name: Build workspace
-        run: cargo build --workspace --all-features
+        run: cargo build --workspace --all-features --locked

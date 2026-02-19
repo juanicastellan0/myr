@@ -30,5 +30,5 @@
 ## M4: Stable release
 
 - [x] Packaging hardening
-- [ ] Cross-platform validation
+- [x] Cross-platform validation
 - [ ] Documentation completion
