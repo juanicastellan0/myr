@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -13,17 +17,62 @@ env:
   BIN_NAME: myr-app
 
 jobs:
+  prepare:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tag and workspace version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag '${tag}' must match v<semver>."
+            exit 1
+          fi
+
+          version="$(awk '
+            /^\[workspace\.package\]$/ { in_section=1; next }
+            /^\[/ { in_section=0 }
+            in_section && $1=="version" {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)"
+
+          if [[ -z "${version}" ]]; then
+            echo "Could not read [workspace.package].version from Cargo.toml."
+            exit 1
+          fi
+
+          if [[ "v${version}" != "${tag}" ]]; then
+            echo "Tag '${tag}' does not match workspace version 'v${version}'."
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
   build-artifacts:
     name: Build (${{ matrix.os }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            archive_name: myr-app-linux-x86_64.tar.gz
-          - os: macos-latest
-            archive_name: myr-app-macos-x86_64.tar.gz
+            platform: linux-x86_64
+          - os: macos-13
+            platform: macos-x86_64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,29 +84,58 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release -p myr-app
+        run: cargo build --locked --release -p myr-app --bin "${BIN_NAME}"
 
       - name: Package artifact
-        run: tar -czf "${{ matrix.archive_name }}" -C target/release "${BIN_NAME}"
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_root="${BIN_NAME}-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}"
+          archive_name="${archive_root}.tar.gz"
+
+          mkdir -p "dist/${archive_root}"
+          cp "target/release/${BIN_NAME}" "dist/${archive_root}/${BIN_NAME}"
+          cp README.md LICENSE "dist/${archive_root}/"
+          tar -czf "${archive_name}" -C dist "${archive_root}"
+
+          echo "archive_name=${archive_name}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive_name }}
-          path: ${{ matrix.archive_name }}
+          name: release-${{ matrix.platform }}
+          path: ${{ steps.package.outputs.archive_name }}
           if-no-files-found: error
 
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: build-artifacts
+    needs:
+      - prepare
+      - build-artifacts
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: release-*
           path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum *.tar.gz > SHA256SUMS.txt
 
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.tar.gz
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: myr ${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt
