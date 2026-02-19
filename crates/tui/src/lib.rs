@@ -21,6 +21,9 @@ use myr_core::query_runner::{CancellationToken, QueryRow, QueryRunner};
 use myr_core::results_buffer::ResultsRingBuffer;
 use myr_core::safe_mode::{ConfirmationToken, GuardDecision, SafeModeGuard};
 use myr_core::schema_cache::SchemaCacheService;
+use myr_core::sql_generator::{
+    keyset_first_page_sql, keyset_page_sql, offset_page_sql, PaginationDirection, SqlTarget,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -33,6 +36,7 @@ const TICK_RATE: Duration = Duration::from_millis(120);
 const QUERY_DURATION_TICKS: u8 = 10;
 const FOOTER_ACTIONS_LIMIT: usize = 7;
 const RESULT_BUFFER_CAPACITY: usize = 2_000;
+const PREVIEW_PAGE_SIZE: usize = 200;
 
 const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
 const DEMO_SCHEMA_COLUMNS: [&str; 4] = ["id", "email", "created_at", "updated_at"];
@@ -174,6 +178,33 @@ enum Msg {
     Tick,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageTransition {
+    Reset,
+    Next,
+    Previous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaginationPlan {
+    Keyset {
+        key_column: String,
+        first_key: Option<String>,
+        last_key: Option<String>,
+    },
+    Offset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaginationState {
+    database: Option<String>,
+    table: String,
+    page_size: usize,
+    page_index: usize,
+    last_page_row_count: usize,
+    plan: PaginationPlan,
+}
+
 #[derive(Debug)]
 struct TuiApp {
     actions: ActionsEngine,
@@ -210,6 +241,8 @@ struct TuiApp {
     result_columns: Vec<String>,
     results_cursor: usize,
     results: ResultsRingBuffer<QueryRow>,
+    pagination_state: Option<PaginationState>,
+    pending_page_transition: Option<PageTransition>,
     cancel_requested: bool,
     status_line: String,
     query_editor_text: String,
@@ -263,6 +296,8 @@ impl Default for TuiApp {
             ],
             results_cursor: 0,
             results: ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY),
+            pagination_state: None,
+            pending_page_transition: None,
             cancel_requested: false,
             status_line: "Fill connection details and press Enter to connect".to_string(),
             query_editor_text: "SELECT * FROM `users`".to_string(),
@@ -340,6 +375,7 @@ impl TuiApp {
             if self.query_ticks_remaining == 0 {
                 self.query_running = false;
                 self.populate_demo_results();
+                self.finalize_pagination_after_query();
                 self.status_line = "Query completed".to_string();
             } else {
                 self.query_ticks_remaining = self.query_ticks_remaining.saturating_sub(1);
@@ -489,6 +525,7 @@ impl TuiApp {
         } else {
             SchemaLane::Tables
         };
+        self.clear_pagination_state();
         self.set_query_editor_to_selected_table();
         self.pane = Pane::SchemaExplorer;
     }
@@ -587,6 +624,7 @@ impl TuiApp {
             .cloned();
         self.selection.database = self.active_database.clone();
         self.reload_tables_for_active_database();
+        self.clear_pagination_state();
         self.set_query_editor_to_selected_table();
 
         if let Some(database) = &self.active_database {
@@ -613,6 +651,7 @@ impl TuiApp {
 
         self.selection.table = self.schema_tables.get(self.selected_table_index).cloned();
         self.reload_columns_for_selected_table();
+        self.clear_pagination_state();
         self.set_query_editor_to_selected_table();
 
         if let Some(table) = &self.selection.table {
@@ -865,7 +904,7 @@ impl TuiApp {
     fn invoke_action(&mut self, action_id: ActionId) {
         let context = self.action_context();
         match self.actions.invoke(action_id, &context) {
-            Ok(invocation) => self.apply_invocation(invocation),
+            Ok(invocation) => self.apply_invocation(action_id, invocation),
             Err(error) => self.status_line = format!("Action error: {error}"),
         }
     }
@@ -892,6 +931,7 @@ impl TuiApp {
                     self.query_running = false;
                     self.has_results = !self.results.is_empty();
                     self.results_cursor = 0;
+                    self.finalize_pagination_after_query();
                     self.status_line = format!(
                         "Query returned {} rows in {:.1?}",
                         summary.rows_streamed, summary.elapsed
@@ -899,6 +939,7 @@ impl TuiApp {
                 }
                 Err(error) => {
                     self.query_running = false;
+                    self.pending_page_transition = None;
                     self.status_line = format!("Query failed: {error}");
                 }
             }
@@ -910,23 +951,234 @@ impl TuiApp {
         self.status_line = "Running query...".to_string();
     }
 
-    fn apply_invocation(&mut self, invocation: ActionInvocation) {
-        match invocation {
-            ActionInvocation::RunSql(sql) => match self.safe_mode_guard.evaluate(&sql) {
-                GuardDecision::Allow { .. } => {
-                    self.pending_confirmation = None;
-                    self.start_query(sql);
+    fn execute_sql_with_guard(&mut self, sql: String) {
+        match self.safe_mode_guard.evaluate(&sql) {
+            GuardDecision::Allow { .. } => {
+                self.pending_confirmation = None;
+                self.start_query(sql);
+            }
+            GuardDecision::RequireConfirmation { token, assessment } => {
+                self.pending_confirmation = Some((token, sql.clone()));
+                self.query_editor_text = sql;
+                self.pane = Pane::QueryEditor;
+                self.status_line = format!(
+                    "Safe mode confirmation required: {:?}. Press Enter again to confirm.",
+                    assessment.reasons
+                );
+            }
+        }
+    }
+
+    fn start_preview_paged_query(&mut self, fallback_sql: String) {
+        let Some(state) = self.build_preview_pagination_state() else {
+            self.clear_pagination_state();
+            self.execute_sql_with_guard(fallback_sql);
+            return;
+        };
+
+        let sql = match self.pagination_sql(&state, PageTransition::Reset) {
+            Ok(sql) => sql,
+            Err(error) => {
+                self.clear_pagination_state();
+                self.status_line = format!("Pagination setup failed: {error}");
+                return;
+            }
+        };
+
+        if !self.schema_columns.is_empty() {
+            self.result_columns = self.schema_columns.clone();
+        }
+        self.pagination_state = Some(state);
+        self.pending_page_transition = Some(PageTransition::Reset);
+        self.execute_sql_with_guard(sql);
+    }
+
+    fn run_pagination_transition(&mut self, transition: PageTransition) {
+        let Some(state) = self.pagination_state.clone() else {
+            self.status_line = "Pagination is not active for the current result set".to_string();
+            return;
+        };
+
+        if matches!(transition, PageTransition::Previous) && state.page_index == 0 {
+            self.status_line = "Already at the first page".to_string();
+            return;
+        }
+
+        let sql = match self.pagination_sql(&state, transition) {
+            Ok(sql) => sql,
+            Err(error) => {
+                self.status_line = format!("Pagination unavailable: {error}");
+                return;
+            }
+        };
+
+        if !self.schema_columns.is_empty() {
+            self.result_columns = self.schema_columns.clone();
+        }
+        self.pending_page_transition = Some(transition);
+        self.execute_sql_with_guard(sql);
+    }
+
+    fn pagination_sql(
+        &self,
+        state: &PaginationState,
+        transition: PageTransition,
+    ) -> Result<String, String> {
+        let target = SqlTarget::new(state.database.as_deref(), state.table.as_str())
+            .map_err(|error| error.to_string())?;
+
+        match &state.plan {
+            PaginationPlan::Keyset {
+                key_column,
+                first_key,
+                last_key,
+            } => match transition {
+                PageTransition::Reset => {
+                    keyset_first_page_sql(&target, key_column, state.page_size)
+                        .map_err(|error| error.to_string())
                 }
-                GuardDecision::RequireConfirmation { token, assessment } => {
-                    self.pending_confirmation = Some((token, sql.clone()));
-                    self.query_editor_text = sql;
-                    self.pane = Pane::QueryEditor;
-                    self.status_line = format!(
-                        "Safe mode confirmation required: {:?}. Press Enter again to confirm.",
-                        assessment.reasons
-                    );
+                PageTransition::Next => {
+                    let Some(boundary) = last_key.as_deref() else {
+                        return Err("missing keyset boundary for next page".to_string());
+                    };
+                    keyset_page_sql(
+                        &target,
+                        key_column,
+                        boundary,
+                        PaginationDirection::Next,
+                        state.page_size,
+                    )
+                    .map_err(|error| error.to_string())
+                }
+                PageTransition::Previous => {
+                    let Some(boundary) = first_key.as_deref() else {
+                        return Err("missing keyset boundary for previous page".to_string());
+                    };
+                    keyset_page_sql(
+                        &target,
+                        key_column,
+                        boundary,
+                        PaginationDirection::Previous,
+                        state.page_size,
+                    )
+                    .map_err(|error| error.to_string())
                 }
             },
+            PaginationPlan::Offset => {
+                let next_index = match transition {
+                    PageTransition::Reset => 0,
+                    PageTransition::Next => state.page_index.saturating_add(1),
+                    PageTransition::Previous => state.page_index.saturating_sub(1),
+                };
+                let offset = next_index.saturating_mul(state.page_size);
+                Ok(offset_page_sql(&target, state.page_size, offset))
+            }
+        }
+    }
+
+    fn build_preview_pagination_state(&self) -> Option<PaginationState> {
+        let table = self.selection.table.clone()?;
+        let plan = match candidate_key_column(&self.schema_columns) {
+            Some(key_column) => PaginationPlan::Keyset {
+                key_column,
+                first_key: None,
+                last_key: None,
+            },
+            None => PaginationPlan::Offset,
+        };
+
+        Some(PaginationState {
+            database: self.selection.database.clone(),
+            table,
+            page_size: PREVIEW_PAGE_SIZE,
+            page_index: 0,
+            last_page_row_count: 0,
+            plan,
+        })
+    }
+
+    fn finalize_pagination_after_query(&mut self) {
+        let Some(transition) = self.pending_page_transition.take() else {
+            return;
+        };
+
+        let row_count = self.results.len();
+        let key_bounds = self
+            .pagination_state
+            .as_ref()
+            .and_then(|state| match &state.plan {
+                PaginationPlan::Keyset { key_column, .. } => Some(extract_key_bounds(
+                    &self.results,
+                    &self.result_columns,
+                    key_column,
+                )),
+                PaginationPlan::Offset => None,
+            });
+
+        let Some(state) = self.pagination_state.as_mut() else {
+            return;
+        };
+
+        state.last_page_row_count = row_count;
+        match transition {
+            PageTransition::Reset => state.page_index = 0,
+            PageTransition::Next => {
+                if row_count > 0 {
+                    state.page_index = state.page_index.saturating_add(1);
+                }
+            }
+            PageTransition::Previous => {
+                if row_count > 0 {
+                    state.page_index = state.page_index.saturating_sub(1);
+                }
+            }
+        }
+
+        if let (
+            PaginationPlan::Keyset {
+                first_key,
+                last_key,
+                ..
+            },
+            Some((first, last)),
+        ) = (&mut state.plan, key_bounds)
+        {
+            *first_key = first;
+            *last_key = last;
+        }
+    }
+
+    fn clear_pagination_state(&mut self) {
+        self.pagination_state = None;
+        self.pending_page_transition = None;
+    }
+
+    fn pagination_capabilities(&self) -> (bool, bool, bool) {
+        let Some(state) = self.pagination_state.as_ref() else {
+            return (false, false, false);
+        };
+
+        let can_page_next = self.has_results && state.last_page_row_count >= state.page_size;
+        let can_page_previous = state.page_index > 0;
+        (true, can_page_next, can_page_previous)
+    }
+
+    fn apply_invocation(&mut self, action_id: ActionId, invocation: ActionInvocation) {
+        match invocation {
+            ActionInvocation::RunSql(sql) => {
+                if action_id == ActionId::PreviewTable {
+                    self.start_preview_paged_query(sql);
+                } else {
+                    self.clear_pagination_state();
+                    self.execute_sql_with_guard(sql);
+                }
+            }
+            ActionInvocation::PaginatePrevious => {
+                self.run_pagination_transition(PageTransition::Previous);
+            }
+            ActionInvocation::PaginateNext => {
+                self.run_pagination_transition(PageTransition::Next);
+            }
             ActionInvocation::ReplaceQueryEditorText(query) => {
                 self.query_editor_text = query;
                 self.status_line = "Applied LIMIT suggestion".to_string();
@@ -972,6 +1224,7 @@ impl TuiApp {
         } else {
             None
         };
+        let (pagination_enabled, can_page_next, can_page_previous) = self.pagination_capabilities();
 
         ActionContext {
             view,
@@ -979,6 +1232,9 @@ impl TuiApp {
             query_text,
             query_running: self.query_running,
             has_results: self.has_results,
+            pagination_enabled,
+            can_page_next,
+            can_page_previous,
         }
     }
 
@@ -1257,6 +1513,20 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 Line::from("Results View (virtualized)"),
                 Line::from("Use arrows / hjkl to move cursor."),
             ];
+            if let Some(state) = &app.pagination_state {
+                let strategy = match &state.plan {
+                    PaginationPlan::Keyset { key_column, .. } => {
+                        format!("keyset by `{key_column}`")
+                    }
+                    PaginationPlan::Offset => "offset fallback".to_string(),
+                };
+                lines.push(Line::from(format!(
+                    "Page {} | Strategy: {} | Page size {}",
+                    state.page_index + 1,
+                    strategy,
+                    state.page_size
+                )));
+            }
 
             for (offset, row) in rows.into_iter().enumerate() {
                 let absolute_index = window_start + offset;
@@ -1404,6 +1674,45 @@ fn quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
 }
 
+fn candidate_key_column(columns: &[String]) -> Option<String> {
+    if let Some(column) = columns
+        .iter()
+        .find(|column| column.eq_ignore_ascii_case("id"))
+    {
+        return Some(column.clone());
+    }
+
+    columns
+        .iter()
+        .find(|column| column.to_ascii_lowercase().ends_with("_id"))
+        .cloned()
+}
+
+fn extract_key_bounds(
+    results: &ResultsRingBuffer<QueryRow>,
+    columns: &[String],
+    key_column: &str,
+) -> (Option<String>, Option<String>) {
+    let Some(key_index) = columns
+        .iter()
+        .position(|column| column.eq_ignore_ascii_case(key_column))
+    else {
+        return (None, None);
+    };
+
+    let first = results
+        .get(0)
+        .and_then(|row| row.values.get(key_index))
+        .cloned();
+    let last = results
+        .len()
+        .checked_sub(1)
+        .and_then(|index| results.get(index))
+        .and_then(|row| row.values.get(key_index))
+        .cloned();
+    (first, last)
+}
+
 fn export_file_path(extension: &str) -> PathBuf {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1468,7 +1777,8 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        map_key_event, suggest_limit_in_editor, DirectionKey, Msg, Pane, SchemaLane, TuiApp,
+        candidate_key_column, extract_key_bounds, map_key_event, suggest_limit_in_editor,
+        DirectionKey, Msg, Pane, QueryRow, ResultsRingBuffer, SchemaLane, TuiApp,
     };
 
     #[test]
@@ -1567,5 +1877,33 @@ mod tests {
 
         assert_eq!(app.selection.table.as_deref(), Some("sessions"));
         assert_eq!(app.selection.column.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn key_column_candidate_prefers_id_then_suffix() {
+        let columns = vec![
+            "created_at".to_string(),
+            "id".to_string(),
+            "account_id".to_string(),
+        ];
+        assert_eq!(candidate_key_column(&columns), Some("id".to_string()));
+
+        let columns = vec!["created_at".to_string(), "account_id".to_string()];
+        assert_eq!(
+            candidate_key_column(&columns),
+            Some("account_id".to_string())
+        );
+    }
+
+    #[test]
+    fn key_bounds_are_extracted_from_first_and_last_rows() {
+        let mut results = ResultsRingBuffer::new(10);
+        results.push(QueryRow::new(vec!["10".to_string(), "a".to_string()]));
+        results.push(QueryRow::new(vec!["11".to_string(), "b".to_string()]));
+        results.push(QueryRow::new(vec!["12".to_string(), "c".to_string()]));
+
+        let columns = vec!["id".to_string(), "payload".to_string()];
+        let bounds = extract_key_bounds(&results, &columns, "id");
+        assert_eq!(bounds, (Some("10".to_string()), Some("12".to_string())));
     }
 }

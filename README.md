@@ -27,6 +27,7 @@ Project bootstrap complete. The detailed product backlog is in `fast-mysql-tui-e
 - Connection profiles in the TUI now attempt real MySQL connections via `mysql_async`.
 - Passwords are read from the `MYR_DB_PASSWORD` environment variable.
 - Schema/table loading and query execution use the live adapter when connected.
+- Table preview now supports paging actions: keyset pagination on detected `id`/`*_id` columns with OFFSET fallback.
 
 ## Benchmark Quickstart
 

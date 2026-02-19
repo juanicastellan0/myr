@@ -13,6 +13,8 @@ const MAX_RECENCY_BOOST: i32 = 25;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ActionId {
     PreviewTable,
+    PreviousPage,
+    NextPage,
     DescribeTable,
     ShowIndexes,
     ShowCreateTable,
@@ -51,6 +53,9 @@ pub struct ActionContext {
     pub query_text: Option<String>,
     pub query_running: bool,
     pub has_results: bool,
+    pub pagination_enabled: bool,
+    pub can_page_next: bool,
+    pub can_page_previous: bool,
 }
 
 impl Default for ActionContext {
@@ -61,6 +66,9 @@ impl Default for ActionContext {
             query_text: None,
             query_running: false,
             has_results: false,
+            pagination_enabled: false,
+            can_page_next: false,
+            can_page_previous: false,
         }
     }
 }
@@ -86,11 +94,21 @@ pub struct ActionDefinition {
     pub description: &'static str,
 }
 
-const ACTIONS: [ActionDefinition; 14] = [
+const ACTIONS: [ActionDefinition; 16] = [
     ActionDefinition {
         id: ActionId::PreviewTable,
         title: "Preview table",
         description: "Run SELECT * with a safe preview LIMIT",
+    },
+    ActionDefinition {
+        id: ActionId::PreviousPage,
+        title: "Previous page",
+        description: "Load previous result page (keyset/offset)",
+    },
+    ActionDefinition {
+        id: ActionId::NextPage,
+        title: "Next page",
+        description: "Load next result page (keyset/offset)",
     },
     ActionDefinition {
         id: ActionId::DescribeTable,
@@ -208,6 +226,8 @@ pub enum CopyTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionInvocation {
     RunSql(String),
+    PaginatePrevious,
+    PaginateNext,
     ReplaceQueryEditorText(String),
     CancelQuery,
     ExportResults(ExportFormat),
@@ -289,6 +309,8 @@ impl ActionsEngine {
                 let target = context_selected_target(context)?;
                 ActionInvocation::RunSql(preview_select_sql(&target, PREVIEW_LIMIT))
             }
+            ActionId::PreviousPage => ActionInvocation::PaginatePrevious,
+            ActionId::NextPage => ActionInvocation::PaginateNext,
             ActionId::DescribeTable => {
                 let target = context_selected_target(context)?;
                 ActionInvocation::RunSql(describe_table_sql(&target))
@@ -376,6 +398,12 @@ fn action_enabled(action_id: ActionId, context: &ActionContext) -> bool {
                 && context.selection.database.is_some()
                 && !context.query_running
         }
+        ActionId::PreviousPage => {
+            context.pagination_enabled && context.can_page_previous && !context.query_running
+        }
+        ActionId::NextPage => {
+            context.pagination_enabled && context.can_page_next && !context.query_running
+        }
         ActionId::CountEstimate => {
             context.selection.table.is_some()
                 && context.selection.database.is_some()
@@ -429,6 +457,26 @@ fn action_base_score(action_id: ActionId, context: &ActionContext) -> i32 {
         ActionId::PreviewTable => {
             if context.view == AppView::SchemaExplorer && context.selection.table.is_some() {
                 900
+            } else {
+                0
+            }
+        }
+        ActionId::PreviousPage => {
+            if context.pagination_enabled
+                && context.can_page_previous
+                && context.view == AppView::Results
+            {
+                840
+            } else {
+                0
+            }
+        }
+        ActionId::NextPage => {
+            if context.pagination_enabled
+                && context.can_page_next
+                && context.view == AppView::Results
+            {
+                860
             } else {
                 0
             }
@@ -556,6 +604,9 @@ mod tests {
             query_text: None,
             query_running: false,
             has_results: false,
+            pagination_enabled: false,
+            can_page_next: false,
+            can_page_previous: false,
         }
     }
 
@@ -627,5 +678,34 @@ mod tests {
             None
         );
         assert_eq!(suggest_preview_limit("DELETE FROM users", 200), None);
+    }
+
+    #[test]
+    fn pagination_actions_are_available_in_results_context() {
+        let mut engine = ActionsEngine::new();
+        let context = ActionContext {
+            view: AppView::Results,
+            selection: SchemaSelection {
+                database: Some("app".to_string()),
+                table: Some("events".to_string()),
+                column: Some("id".to_string()),
+            },
+            query_text: Some("SELECT * FROM `app`.`events` LIMIT 200".to_string()),
+            query_running: false,
+            has_results: true,
+            pagination_enabled: true,
+            can_page_next: true,
+            can_page_previous: true,
+        };
+
+        let next = engine
+            .invoke(ActionId::NextPage, &context)
+            .expect("next page should be enabled");
+        assert_eq!(next, ActionInvocation::PaginateNext);
+
+        let previous = engine
+            .invoke(ActionId::PreviousPage, &context)
+            .expect("previous page should be enabled");
+        assert_eq!(previous, ActionInvocation::PaginatePrevious);
     }
 }

@@ -12,6 +12,12 @@ pub enum SqlGenerationError {
     MissingDatabaseForEstimate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaginationDirection {
+    Next,
+    Previous,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlTarget<'a> {
     pub database: Option<&'a str>,
@@ -41,6 +47,18 @@ fn quote_sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn quote_sql_literal(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.parse::<i128>().is_ok()
+        || trimmed.parse::<u128>().is_ok()
+        || trimmed.parse::<f64>().is_ok()
+    {
+        trimmed.to_string()
+    } else {
+        quote_sql_string(trimmed)
+    }
+}
+
 fn qualified_table_sql(target: &SqlTarget<'_>) -> String {
     match target.database {
         Some(database) => format!(
@@ -57,6 +75,62 @@ pub fn preview_select_sql(target: &SqlTarget<'_>, limit: usize) -> String {
         "SELECT * FROM {} LIMIT {}",
         qualified_table_sql(target),
         limit
+    )
+}
+
+pub fn keyset_first_page_sql(
+    target: &SqlTarget<'_>,
+    key_column: &str,
+    limit: usize,
+) -> Result<String, SqlGenerationError> {
+    if key_column.trim().is_empty() {
+        return Err(SqlGenerationError::EmptyColumnName);
+    }
+
+    let key = quote_identifier(key_column);
+    Ok(format!(
+        "SELECT * FROM {} ORDER BY {} ASC LIMIT {}",
+        qualified_table_sql(target),
+        key,
+        limit
+    ))
+}
+
+pub fn keyset_page_sql(
+    target: &SqlTarget<'_>,
+    key_column: &str,
+    boundary_value: &str,
+    direction: PaginationDirection,
+    limit: usize,
+) -> Result<String, SqlGenerationError> {
+    if key_column.trim().is_empty() {
+        return Err(SqlGenerationError::EmptyColumnName);
+    }
+
+    let table = qualified_table_sql(target);
+    let key = quote_identifier(key_column);
+    let literal = quote_sql_literal(boundary_value);
+
+    let sql = match direction {
+        PaginationDirection::Next => format!(
+            "SELECT * FROM {} WHERE {} > {} ORDER BY {} ASC LIMIT {}",
+            table, key, literal, key, limit
+        ),
+        PaginationDirection::Previous => format!(
+            "SELECT * FROM (SELECT * FROM {} WHERE {} < {} ORDER BY {} DESC LIMIT {}) \
+             AS page_window ORDER BY {} ASC",
+            table, key, literal, key, limit, key
+        ),
+    };
+    Ok(sql)
+}
+
+pub fn offset_page_sql(target: &SqlTarget<'_>, limit: usize, offset: usize) -> String {
+    format!(
+        "SELECT * FROM {} LIMIT {} OFFSET {}",
+        qualified_table_sql(target),
+        limit,
+        offset
     )
 }
 
@@ -105,9 +179,9 @@ pub fn count_estimate_sql(target: &SqlTarget<'_>) -> Result<String, SqlGeneratio
 #[cfg(test)]
 mod tests {
     use super::{
-        count_estimate_sql, describe_table_sql, preview_select_sql, quote_identifier,
-        select_column_preview_sql, show_create_table_sql, show_index_sql, SqlGenerationError,
-        SqlTarget,
+        count_estimate_sql, describe_table_sql, keyset_first_page_sql, keyset_page_sql,
+        offset_page_sql, preview_select_sql, quote_identifier, select_column_preview_sql,
+        show_create_table_sql, show_index_sql, PaginationDirection, SqlGenerationError, SqlTarget,
     };
 
     #[test]
@@ -156,5 +230,50 @@ mod tests {
         let target = SqlTarget::new(None, "users").expect("valid target");
         let err = count_estimate_sql(&target).expect_err("should require database");
         assert_eq!(err, SqlGenerationError::MissingDatabaseForEstimate);
+    }
+
+    #[test]
+    fn generates_keyset_first_and_followup_pages() {
+        let target = SqlTarget::new(Some("app"), "events").expect("valid target");
+
+        let first = keyset_first_page_sql(&target, "id", 200).expect("first-page sql");
+        assert_eq!(
+            first,
+            "SELECT * FROM `app`.`events` ORDER BY `id` ASC LIMIT 200"
+        );
+
+        let next = keyset_page_sql(&target, "id", "250", PaginationDirection::Next, 200)
+            .expect("next-page sql");
+        assert_eq!(
+            next,
+            "SELECT * FROM `app`.`events` WHERE `id` > 250 ORDER BY `id` ASC LIMIT 200"
+        );
+
+        let previous = keyset_page_sql(&target, "id", "251", PaginationDirection::Previous, 200)
+            .expect("previous-page sql");
+        assert_eq!(
+            previous,
+            "SELECT * FROM (SELECT * FROM `app`.`events` WHERE `id` < 251 ORDER BY `id` DESC LIMIT 200) \
+             AS page_window ORDER BY `id` ASC"
+        );
+    }
+
+    #[test]
+    fn keyset_sql_quotes_non_numeric_boundaries() {
+        let target = SqlTarget::new(Some("app"), "events").expect("valid target");
+
+        let sql = keyset_page_sql(&target, "event_id", "a'b", PaginationDirection::Next, 100)
+            .expect("next-page sql");
+        assert_eq!(
+            sql,
+            "SELECT * FROM `app`.`events` WHERE `event_id` > 'a''b' ORDER BY `event_id` ASC LIMIT 100"
+        );
+    }
+
+    #[test]
+    fn generates_offset_pagination_sql() {
+        let target = SqlTarget::new(Some("app"), "events").expect("valid target");
+        let sql = offset_page_sql(&target, 100, 300);
+        assert_eq!(sql, "SELECT * FROM `app`.`events` LIMIT 100 OFFSET 300");
     }
 }

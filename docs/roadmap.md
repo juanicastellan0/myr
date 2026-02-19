@@ -23,7 +23,7 @@
 
 ## M3: Big-table competence
 
-- [ ] Pagination strategy (keyset + fallback)
+- [x] Pagination strategy (keyset + fallback)
 - [x] Performance instrumentation overlay
 - [x] Benchmark scripts and regression checks
 
