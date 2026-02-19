@@ -1,3 +1,4 @@
+pub mod connection_manager;
 pub mod profiles;
 
 #[must_use]
