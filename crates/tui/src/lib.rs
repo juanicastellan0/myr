@@ -305,8 +305,7 @@ impl Default for TuiApp {
             pagination_state: None,
             pending_page_transition: None,
             cancel_requested: false,
-            status_line: "Select a field with Up/Down, press E to edit, Ctrl+S to connect"
-                .to_string(),
+            status_line: "Select a field with Up/Down, press E to edit, F5 to connect".to_string(),
             query_editor_text: "SELECT * FROM `users`".to_string(),
             selection: SchemaSelection {
                 database: Some("app".to_string()),
@@ -1584,7 +1583,7 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 Line::from("Connection Wizard"),
                 Line::from("Up/Down: select field"),
                 Line::from("E or Enter: edit field | Enter: save field"),
-                Line::from("Esc: cancel edit | Ctrl+U: clear field | Ctrl+S: connect"),
+                Line::from("Esc: cancel edit | Ctrl+U: clear field | F5: connect"),
                 Line::from(""),
             ];
             for (field, label, value) in fields {
@@ -1780,10 +1779,10 @@ fn render_help_popup(frame: &mut Frame<'_>) {
     frame.render_widget(Clear, area);
     let help = Paragraph::new(vec![
         Line::from("Global keymap"),
-        Line::from("Ctrl+Q: quit"),
+        Line::from("F10: quit"),
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
-        Line::from("Connection wizard: E/Enter edit, Ctrl+S connect"),
+        Line::from("Connection wizard: E/Enter edit, F5 connect"),
         Line::from("Enter: run query (Query Editor)"),
         Line::from("F2: toggle perf overlay"),
         Line::from("F3: toggle safe mode"),
@@ -1925,8 +1924,6 @@ where
 fn map_key_event(key: KeyEvent) -> Option<Msg> {
     if key.modifiers == KeyModifiers::CONTROL {
         return match key.code {
-            KeyCode::Char('q') => Some(Msg::Quit),
-            KeyCode::Char('s') => Some(Msg::Connect),
             KeyCode::Char('p') => Some(Msg::TogglePalette),
             KeyCode::Char('u') => Some(Msg::ClearInput),
             KeyCode::Char('c') => Some(Msg::CancelQuery),
@@ -1948,6 +1945,8 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('?') => Some(Msg::ToggleHelp),
         KeyCode::Esc => Some(Msg::TogglePalette),
         KeyCode::Tab => Some(Msg::NextPane),
+        KeyCode::F(5) => Some(Msg::Connect),
+        KeyCode::F(10) => Some(Msg::Quit),
         KeyCode::F(2) => Some(Msg::TogglePerfOverlay),
         KeyCode::F(3) => Some(Msg::ToggleSafeMode),
         KeyCode::Enter => Some(Msg::Submit),
@@ -2017,7 +2016,7 @@ mod tests {
     #[test]
     fn keymap_supports_required_global_keys() {
         assert!(matches!(
-            map_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            map_key_event(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE)),
             Some(Msg::Quit)
         ));
         assert!(matches!(
@@ -2049,8 +2048,12 @@ mod tests {
             Some(Msg::TogglePalette)
         ));
         assert!(matches!(
-            map_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            map_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
             Some(Msg::Connect)
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            None
         ));
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
