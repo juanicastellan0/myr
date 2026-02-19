@@ -1,3 +1,5 @@
+pub mod profiles;
+
 #[must_use]
 pub fn domain_name() -> &'static str {
     "myr-core"
