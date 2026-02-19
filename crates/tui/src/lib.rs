@@ -35,6 +35,7 @@ const FOOTER_ACTIONS_LIMIT: usize = 7;
 const RESULT_BUFFER_CAPACITY: usize = 2_000;
 
 const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
+const DEMO_SCHEMA_COLUMNS: [&str; 4] = ["id", "email", "created_at", "updated_at"];
 
 #[derive(Debug, Error)]
 pub enum TuiError {
@@ -48,6 +49,39 @@ enum Pane {
     SchemaExplorer,
     Results,
     QueryEditor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaLane {
+    Databases,
+    Tables,
+    Columns,
+}
+
+impl SchemaLane {
+    fn next(self) -> Self {
+        match self {
+            Self::Databases => Self::Tables,
+            Self::Tables => Self::Columns,
+            Self::Columns => Self::Databases,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Databases => Self::Columns,
+            Self::Tables => Self::Databases,
+            Self::Columns => Self::Tables,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Databases => "Databases",
+            Self::Tables => "Tables",
+            Self::Columns => "Columns",
+        }
+    }
 }
 
 impl Pane {
@@ -150,9 +184,13 @@ struct TuiApp {
     data_backend: Option<MysqlDataBackend>,
     schema_cache: Option<SchemaCacheService<MysqlDataBackend>>,
     schema_databases: Vec<String>,
+    selected_database_index: usize,
     active_database: Option<String>,
     schema_tables: Vec<String>,
     selected_table_index: usize,
+    schema_columns: Vec<String>,
+    selected_column_index: usize,
+    schema_lane: SchemaLane,
     show_help: bool,
     show_palette: bool,
     palette_query: String,
@@ -188,13 +226,20 @@ impl Default for TuiApp {
             connection_manager: None,
             data_backend: None,
             schema_cache: None,
-            schema_databases: Vec::new(),
-            active_database: None,
+            schema_databases: vec!["app".to_string()],
+            selected_database_index: 0,
+            active_database: Some("app".to_string()),
             schema_tables: DEMO_SCHEMA_TABLES
                 .iter()
                 .map(|table| (*table).to_string())
                 .collect(),
             selected_table_index: 0,
+            schema_columns: DEMO_SCHEMA_COLUMNS
+                .iter()
+                .map(|column| (*column).to_string())
+                .collect(),
+            selected_column_index: 0,
+            schema_lane: SchemaLane::Tables,
             show_help: false,
             show_palette: false,
             palette_query: String::new(),
@@ -220,11 +265,11 @@ impl Default for TuiApp {
             results: ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY),
             cancel_requested: false,
             status_line: "Fill connection details and press Enter to connect".to_string(),
-            query_editor_text: "SELECT * FROM users".to_string(),
+            query_editor_text: "SELECT * FROM `users`".to_string(),
             selection: SchemaSelection {
-                database: None,
-                table: None,
-                column: Some("email".to_string()),
+                database: Some("app".to_string()),
+                table: Some("users".to_string()),
+                column: Some("id".to_string()),
             },
         }
     }
@@ -396,18 +441,6 @@ impl TuiApp {
             active_database = databases.first().cloned();
         }
 
-        let tables = if let Some(database_name) = active_database.as_deref() {
-            match block_on_result(schema_cache.list_tables(database_name)) {
-                Ok(tables) => tables,
-                Err(error) => {
-                    self.status_line = format!("Connected, but table fetch failed: {error}");
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
         match FileProfilesStore::load_default() {
             Ok(mut store) => {
                 store.upsert_profile(profile.clone());
@@ -433,16 +466,30 @@ impl TuiApp {
         self.data_backend = Some(data_backend);
         self.schema_cache = Some(schema_cache);
         self.schema_databases = databases;
+        self.selected_database_index = active_database
+            .as_deref()
+            .and_then(|database| {
+                self.schema_databases
+                    .iter()
+                    .position(|candidate| candidate == database)
+            })
+            .unwrap_or(0);
         self.active_database = active_database.clone();
         self.connected_profile = Some(profile.name.clone());
         self.selection.database = active_database;
-        self.schema_tables = tables;
+        self.schema_tables.clear();
         self.selected_table_index = 0;
-        self.selection.table = self.schema_tables.first().cloned();
-        self.selection.column = Some("id".to_string());
-        if let Some(table) = &self.selection.table {
-            self.query_editor_text = format!("SELECT * FROM `{}`", table.replace('`', "``"));
-        }
+        self.selection.table = None;
+        self.schema_columns.clear();
+        self.selected_column_index = 0;
+        self.selection.column = None;
+        self.reload_tables_for_active_database();
+        self.schema_lane = if self.schema_tables.is_empty() {
+            SchemaLane::Databases
+        } else {
+            SchemaLane::Tables
+        };
+        self.set_query_editor_to_selected_table();
         self.pane = Pane::SchemaExplorer;
     }
 
@@ -500,24 +547,174 @@ impl TuiApp {
     }
 
     fn navigate_schema(&mut self, direction: DirectionKey) {
+        match direction {
+            DirectionKey::Left => {
+                self.schema_lane = self.schema_lane.previous();
+                self.status_line = format!("Schema focus: {}", self.schema_lane.label());
+            }
+            DirectionKey::Right => {
+                self.schema_lane = self.schema_lane.next();
+                self.status_line = format!("Schema focus: {}", self.schema_lane.label());
+            }
+            DirectionKey::Up | DirectionKey::Down => match self.schema_lane {
+                SchemaLane::Databases => self.navigate_schema_databases(direction),
+                SchemaLane::Tables => self.navigate_schema_tables(direction),
+                SchemaLane::Columns => self.navigate_schema_columns(direction),
+            },
+        }
+    }
+
+    fn navigate_schema_databases(&mut self, direction: DirectionKey) {
+        if self.schema_databases.is_empty() {
+            self.status_line = "No databases available".to_string();
+            return;
+        }
+
+        match direction {
+            DirectionKey::Up => {
+                self.selected_database_index = self.selected_database_index.saturating_sub(1);
+            }
+            DirectionKey::Down => {
+                let max_index = self.schema_databases.len() - 1;
+                self.selected_database_index = (self.selected_database_index + 1).min(max_index);
+            }
+            DirectionKey::Left | DirectionKey::Right => {}
+        }
+
+        self.active_database = self
+            .schema_databases
+            .get(self.selected_database_index)
+            .cloned();
+        self.selection.database = self.active_database.clone();
+        self.reload_tables_for_active_database();
+        self.set_query_editor_to_selected_table();
+
+        if let Some(database) = &self.active_database {
+            self.status_line = format!("Selected database `{database}`");
+        }
+    }
+
+    fn navigate_schema_tables(&mut self, direction: DirectionKey) {
         if self.schema_tables.is_empty() {
             self.status_line = "No tables available".to_string();
             return;
         }
 
         match direction {
-            DirectionKey::Up | DirectionKey::Left => {
+            DirectionKey::Up => {
                 self.selected_table_index = self.selected_table_index.saturating_sub(1);
             }
-            DirectionKey::Down | DirectionKey::Right => {
+            DirectionKey::Down => {
                 let max_index = self.schema_tables.len() - 1;
                 self.selected_table_index = (self.selected_table_index + 1).min(max_index);
             }
+            DirectionKey::Left | DirectionKey::Right => {}
         }
 
         self.selection.table = self.schema_tables.get(self.selected_table_index).cloned();
+        self.reload_columns_for_selected_table();
+        self.set_query_editor_to_selected_table();
+
         if let Some(table) = &self.selection.table {
             self.status_line = format!("Selected table `{table}`");
+        }
+    }
+
+    fn navigate_schema_columns(&mut self, direction: DirectionKey) {
+        if self.schema_columns.is_empty() {
+            self.status_line = "No columns available".to_string();
+            return;
+        }
+
+        match direction {
+            DirectionKey::Up => {
+                self.selected_column_index = self.selected_column_index.saturating_sub(1);
+            }
+            DirectionKey::Down => {
+                let max_index = self.schema_columns.len() - 1;
+                self.selected_column_index = (self.selected_column_index + 1).min(max_index);
+            }
+            DirectionKey::Left | DirectionKey::Right => {}
+        }
+
+        self.selection.column = self.schema_columns.get(self.selected_column_index).cloned();
+        if let Some(column) = &self.selection.column {
+            self.status_line = format!("Selected column `{column}`");
+        }
+    }
+
+    fn reload_tables_for_active_database(&mut self) {
+        let Some(database_name) = self.active_database.clone() else {
+            self.schema_tables.clear();
+            self.selected_table_index = 0;
+            self.selection.table = None;
+            self.reload_columns_for_selected_table();
+            return;
+        };
+
+        if let Some(schema_cache) = self.schema_cache.as_mut() {
+            self.schema_tables = match block_on_result(schema_cache.list_tables(&database_name)) {
+                Ok(tables) => tables,
+                Err(error) => {
+                    self.status_line = format!("Table fetch failed: {error}");
+                    Vec::new()
+                }
+            };
+        } else if self.schema_tables.is_empty() {
+            self.schema_tables = DEMO_SCHEMA_TABLES
+                .iter()
+                .map(|table| (*table).to_string())
+                .collect();
+        }
+
+        self.selected_table_index = 0;
+        self.selection.table = self.schema_tables.first().cloned();
+        self.reload_columns_for_selected_table();
+    }
+
+    fn reload_columns_for_selected_table(&mut self) {
+        let Some(table_name) = self.selection.table.clone() else {
+            self.schema_columns.clear();
+            self.selected_column_index = 0;
+            self.selection.column = None;
+            return;
+        };
+
+        if let Some(schema_cache) = self.schema_cache.as_mut() {
+            if let Some(database_name) = self.active_database.clone() {
+                self.schema_columns =
+                    match block_on_result(schema_cache.list_columns(&database_name, &table_name)) {
+                        Ok(columns) => columns.into_iter().map(|column| column.name).collect(),
+                        Err(error) => {
+                            self.status_line = format!("Column fetch failed: {error}");
+                            Vec::new()
+                        }
+                    };
+            } else {
+                self.schema_columns.clear();
+            }
+        } else {
+            self.schema_columns = DEMO_SCHEMA_COLUMNS
+                .iter()
+                .map(|column| (*column).to_string())
+                .collect();
+        }
+
+        self.selected_column_index = 0;
+        self.selection.column = self.schema_columns.first().cloned();
+    }
+
+    fn set_query_editor_to_selected_table(&mut self) {
+        let Some(table) = self.selection.table.as_deref() else {
+            return;
+        };
+
+        let table_sql = quote_identifier(table);
+        if let Some(database) = self.selection.database.as_deref() {
+            let database_sql = quote_identifier(database);
+            self.query_editor_text = format!("SELECT * FROM {database_sql}.{table_sql}");
+        } else {
+            self.query_editor_text = format!("SELECT * FROM {table_sql}");
         }
     }
 
@@ -990,32 +1187,64 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         Pane::SchemaExplorer => {
             let mut lines = vec![
                 Line::from("Schema Explorer"),
-                Line::from("Use arrows / hjkl to select table."),
-                Line::from("Press 1 for preview action."),
+                Line::from("Left/Right switches focus lane, Up/Down changes selection."),
+                Line::from(format!(
+                    "Focus lane: {} (press 1 for preview action).",
+                    app.schema_lane.label()
+                )),
                 Line::from(""),
             ];
 
             if app.schema_databases.is_empty() {
                 lines.push(Line::from("Databases: (none loaded)"));
             } else {
-                lines.push(Line::from(format!(
-                    "Databases: {}",
-                    app.schema_databases.join(", ")
-                )));
+                lines.push(Line::from("Databases:"));
+                for (index, database) in app.schema_databases.iter().enumerate() {
+                    let marker = if app.schema_lane == SchemaLane::Databases
+                        && index == app.selected_database_index
+                    {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    lines.push(Line::from(format!("{marker} {database}")));
+                }
             }
+            lines.push(Line::from(""));
             lines.push(Line::from(format!(
                 "Active DB: {}",
                 app.active_database.as_deref().unwrap_or("-")
             )));
-            lines.push(Line::from(""));
+            lines.push(Line::from("Tables:"));
 
             for (index, table) in app.schema_tables.iter().enumerate() {
-                let marker = if index == app.selected_table_index {
+                let marker =
+                    if app.schema_lane == SchemaLane::Tables && index == app.selected_table_index {
+                        ">"
+                    } else {
+                        " "
+                    };
+                lines.push(Line::from(format!("{marker} {table}")));
+            }
+
+            if app.schema_tables.is_empty() {
+                lines.push(Line::from("  (none)"));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from("Columns:"));
+            for (index, column) in app.schema_columns.iter().enumerate() {
+                let marker = if app.schema_lane == SchemaLane::Columns
+                    && index == app.selected_column_index
+                {
                     ">"
                 } else {
                     " "
                 };
-                lines.push(Line::from(format!("{marker} {table}")));
+                lines.push(Line::from(format!("{marker} {column}")));
+            }
+            if app.schema_columns.is_empty() {
+                lines.push(Line::from("  (none)"));
             }
             lines
         }
@@ -1171,6 +1400,10 @@ fn centered_rect(width_percent: u16, height_percent: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
+fn quote_identifier(identifier: &str) -> String {
+    format!("`{}`", identifier.replace('`', "``"))
+}
+
 fn export_file_path(extension: &str) -> PathBuf {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1234,7 +1467,9 @@ fn suggest_limit_in_editor(query: &str) -> Option<String> {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{map_key_event, suggest_limit_in_editor, Msg, Pane};
+    use super::{
+        map_key_event, suggest_limit_in_editor, DirectionKey, Msg, Pane, SchemaLane, TuiApp,
+    };
 
     #[test]
     fn pane_cycles_in_expected_order() {
@@ -1300,5 +1535,37 @@ mod tests {
             map_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
             Some(Msg::InputChar('x'))
         ));
+    }
+
+    #[test]
+    fn schema_lane_switches_with_horizontal_navigation() {
+        let mut app = TuiApp {
+            pane: Pane::SchemaExplorer,
+            schema_lane: SchemaLane::Tables,
+            ..TuiApp::default()
+        };
+
+        app.navigate(DirectionKey::Right);
+        assert_eq!(app.schema_lane, SchemaLane::Columns);
+
+        app.navigate(DirectionKey::Left);
+        assert_eq!(app.schema_lane, SchemaLane::Tables);
+    }
+
+    #[test]
+    fn schema_table_navigation_updates_column_selection() {
+        let mut app = TuiApp {
+            pane: Pane::SchemaExplorer,
+            schema_lane: SchemaLane::Tables,
+            ..TuiApp::default()
+        };
+        app.selection.database = Some("app".to_string());
+        app.selection.table = app.schema_tables.first().cloned();
+        app.reload_columns_for_selected_table();
+
+        app.navigate(DirectionKey::Down);
+
+        assert_eq!(app.selection.table.as_deref(), Some("sessions"));
+        assert_eq!(app.selection.column.as_deref(), Some("id"));
     }
 }

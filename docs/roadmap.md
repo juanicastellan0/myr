@@ -9,7 +9,7 @@
 ## M1: Explorer MVP
 
 - [x] Connection profiles and connection wizard (initial implementation)
-- [ ] Schema explorer (databases, tables, columns)
+- [x] Schema explorer (databases, tables, columns)
 - [x] Table preview action
 - [x] Streaming results with bounded buffer
 - [x] Context-aware next actions footer
