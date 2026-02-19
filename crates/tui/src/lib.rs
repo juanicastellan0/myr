@@ -12,7 +12,7 @@ use crossterm::terminal::{
 };
 use myr_adapters::export::{export_rows_to_csv, export_rows_to_json};
 use myr_core::actions_engine::{
-    ActionContext, ActionInvocation, ActionsEngine, AppView, SchemaSelection,
+    ActionContext, ActionId, ActionInvocation, ActionsEngine, AppView, SchemaSelection,
 };
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore};
 use myr_core::query_runner::QueryRow;
@@ -129,6 +129,8 @@ enum Msg {
     CancelQuery,
     Navigate(DirectionKey),
     InvokeActionSlot(usize),
+    InputChar(char),
+    Backspace,
     Tick,
 }
 
@@ -142,6 +144,8 @@ struct TuiApp {
     selected_table_index: usize,
     show_help: bool,
     show_palette: bool,
+    palette_query: String,
+    palette_selection: usize,
     should_quit: bool,
     query_running: bool,
     query_ticks_remaining: u8,
@@ -169,6 +173,8 @@ impl Default for TuiApp {
             selected_table_index: 0,
             show_help: false,
             show_palette: false,
+            palette_query: String::new(),
+            palette_selection: 0,
             should_quit: false,
             query_running: false,
             query_ticks_remaining: 0,
@@ -209,8 +215,12 @@ impl TuiApp {
             }
             Msg::TogglePalette => {
                 self.show_palette = !self.show_palette;
+                if self.show_palette {
+                    self.palette_query.clear();
+                    self.palette_selection = 0;
+                }
                 self.status_line = if self.show_palette {
-                    "Command palette opened (placeholder)".to_string()
+                    "Command palette opened".to_string()
                 } else {
                     "Command palette closed".to_string()
                 };
@@ -224,6 +234,8 @@ impl TuiApp {
             }
             Msg::Navigate(direction) => self.navigate(direction),
             Msg::InvokeActionSlot(index) => self.invoke_ranked_action(index),
+            Msg::InputChar(ch) => self.handle_input_char(ch),
+            Msg::Backspace => self.handle_backspace(),
             Msg::Tick => self.on_tick(),
         }
     }
@@ -241,17 +253,20 @@ impl TuiApp {
     }
 
     fn submit(&mut self) {
+        if self.show_palette {
+            if let Some(action_id) = self.selected_palette_action() {
+                self.invoke_action(action_id);
+                self.show_palette = false;
+            } else {
+                self.status_line = "No matching palette action".to_string();
+            }
+            return;
+        }
+
         match self.pane {
             Pane::ConnectionWizard => self.connect_from_wizard(),
             Pane::QueryEditor => {
-                let context = self.action_context();
-                match self.actions.invoke(
-                    myr_core::actions_engine::ActionId::RunCurrentQuery,
-                    &context,
-                ) {
-                    Ok(invocation) => self.apply_invocation(invocation),
-                    Err(error) => self.status_line = format!("Run query failed: {error}"),
-                }
+                self.invoke_action(ActionId::RunCurrentQuery);
             }
             Pane::SchemaExplorer | Pane::Results => {
                 self.status_line = "Nothing to submit in this view".to_string();
@@ -302,6 +317,11 @@ impl TuiApp {
     }
 
     fn navigate(&mut self, direction: DirectionKey) {
+        if self.show_palette {
+            self.navigate_palette(direction);
+            return;
+        }
+
         match self.pane {
             Pane::ConnectionWizard => {
                 if matches!(direction, DirectionKey::Left | DirectionKey::Up) {
@@ -318,6 +338,25 @@ impl TuiApp {
                 self.status_line = format!("Navigation in editor: {direction:?}");
             }
         }
+    }
+
+    fn navigate_palette(&mut self, direction: DirectionKey) {
+        let entry_count = self.palette_entries().len();
+        if entry_count == 0 {
+            self.palette_selection = 0;
+            return;
+        }
+
+        match direction {
+            DirectionKey::Up | DirectionKey::Left => {
+                self.palette_selection = self.palette_selection.saturating_sub(1);
+            }
+            DirectionKey::Down | DirectionKey::Right => {
+                self.palette_selection = (self.palette_selection + 1).min(entry_count - 1);
+            }
+        }
+
+        self.status_line = format!("Palette selection: {}", self.palette_selection + 1);
     }
 
     fn previous_wizard_field(&self) -> WizardField {
@@ -436,7 +475,56 @@ impl TuiApp {
         }
     }
 
+    fn palette_entries(&self) -> Vec<ActionId> {
+        let query = self.palette_query.to_ascii_lowercase();
+        self.actions
+            .rank_top_n(&self.action_context(), 50)
+            .into_iter()
+            .filter(|action| {
+                if query.is_empty() {
+                    true
+                } else {
+                    action.title.to_ascii_lowercase().contains(&query)
+                }
+            })
+            .map(|action| action.id)
+            .collect()
+    }
+
+    fn selected_palette_action(&self) -> Option<ActionId> {
+        let entries = self.palette_entries();
+        entries.get(self.palette_selection).copied()
+    }
+
+    fn handle_input_char(&mut self, ch: char) {
+        if self.show_palette {
+            self.palette_query.push(ch);
+            self.palette_selection = 0;
+            self.status_line = format!("Palette query: {}", self.palette_query);
+        } else if self.pane == Pane::QueryEditor {
+            self.query_editor_text.push(ch);
+            self.status_line = "Query text updated".to_string();
+        }
+    }
+
+    fn handle_backspace(&mut self) {
+        if self.show_palette {
+            self.palette_query.pop();
+            self.palette_selection = 0;
+            self.status_line = format!("Palette query: {}", self.palette_query);
+        } else if self.pane == Pane::QueryEditor {
+            self.query_editor_text.pop();
+            self.status_line = "Query text updated".to_string();
+        }
+    }
+
     fn invoke_ranked_action(&mut self, index: usize) {
+        if self.show_palette {
+            self.palette_selection = index.min(self.palette_entries().len().saturating_sub(1));
+            self.submit();
+            return;
+        }
+
         let context = self.action_context();
         let ranked = self.actions.rank_top_n(&context, FOOTER_ACTIONS_LIMIT);
         let Some(action) = ranked.get(index) else {
@@ -444,7 +532,12 @@ impl TuiApp {
             return;
         };
 
-        match self.actions.invoke(action.id, &context) {
+        self.invoke_action(action.id);
+    }
+
+    fn invoke_action(&mut self, action_id: ActionId) {
+        let context = self.action_context();
+        match self.actions.invoke(action_id, &context) {
             Ok(invocation) => self.apply_invocation(invocation),
             Err(error) => self.status_line = format!("Action error: {error}"),
         }
@@ -767,6 +860,9 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     .block(Block::default().borders(Borders::ALL).title("Next Actions"));
     frame.render_widget(footer, chunks[2]);
 
+    if app.show_palette {
+        render_palette_popup(frame, app);
+    }
     if app.show_help {
         render_help_popup(frame);
     }
@@ -788,6 +884,48 @@ fn render_help_popup(frame: &mut Frame<'_>) {
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"));
     frame.render_widget(help, area);
+}
+
+fn render_palette_popup(frame: &mut Frame<'_>, app: &TuiApp) {
+    let area = centered_rect(70, 60, frame.area());
+    frame.render_widget(Clear, area);
+
+    let entries = app.palette_entries();
+    let mut lines = vec![
+        Line::from("Command Palette"),
+        Line::from(format!("Query: {}", app.palette_query)),
+        Line::from(""),
+    ];
+
+    if entries.is_empty() {
+        lines.push(Line::from("No actions match current query"));
+    } else {
+        for (index, action_id) in entries.iter().take(10).enumerate() {
+            let title = app
+                .actions
+                .registry()
+                .find(*action_id)
+                .map_or("unknown action", |action| action.title);
+            let marker = if index == app.palette_selection {
+                ">"
+            } else {
+                " "
+            };
+            lines.push(Line::from(format!("{marker} {title}")));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "Type to filter, arrows to navigate, Enter to run",
+    ));
+
+    let palette = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Palette (Ctrl+P / Esc)"),
+    );
+    frame.render_widget(palette, area);
 }
 
 fn centered_rect(width_percent: u16, height_percent: u16, area: Rect) -> Rect {
@@ -818,24 +956,33 @@ fn export_file_path(extension: &str) -> PathBuf {
 }
 
 fn map_key_event(key: KeyEvent) -> Option<Msg> {
-    match (key.modifiers, key.code) {
-        (_, KeyCode::Char('q')) => Some(Msg::Quit),
-        (_, KeyCode::Char('?')) => Some(Msg::ToggleHelp),
-        (_, KeyCode::Tab) => Some(Msg::NextPane),
-        (_, KeyCode::Enter) => Some(Msg::Submit),
-        (KeyModifiers::CONTROL, KeyCode::Char('p')) => Some(Msg::TogglePalette),
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => Some(Msg::CancelQuery),
-        (_, KeyCode::Up | KeyCode::Char('k')) => Some(Msg::Navigate(DirectionKey::Up)),
-        (_, KeyCode::Down | KeyCode::Char('j')) => Some(Msg::Navigate(DirectionKey::Down)),
-        (_, KeyCode::Left | KeyCode::Char('h')) => Some(Msg::Navigate(DirectionKey::Left)),
-        (_, KeyCode::Right | KeyCode::Char('l')) => Some(Msg::Navigate(DirectionKey::Right)),
-        (_, KeyCode::Char('1')) => Some(Msg::InvokeActionSlot(0)),
-        (_, KeyCode::Char('2')) => Some(Msg::InvokeActionSlot(1)),
-        (_, KeyCode::Char('3')) => Some(Msg::InvokeActionSlot(2)),
-        (_, KeyCode::Char('4')) => Some(Msg::InvokeActionSlot(3)),
-        (_, KeyCode::Char('5')) => Some(Msg::InvokeActionSlot(4)),
-        (_, KeyCode::Char('6')) => Some(Msg::InvokeActionSlot(5)),
-        (_, KeyCode::Char('7')) => Some(Msg::InvokeActionSlot(6)),
+    if key.modifiers == KeyModifiers::CONTROL {
+        return match key.code {
+            KeyCode::Char('p') => Some(Msg::TogglePalette),
+            KeyCode::Char('c') => Some(Msg::CancelQuery),
+            _ => None,
+        };
+    }
+
+    match key.code {
+        KeyCode::Char('q') => Some(Msg::Quit),
+        KeyCode::Char('?') => Some(Msg::ToggleHelp),
+        KeyCode::Esc => Some(Msg::TogglePalette),
+        KeyCode::Tab => Some(Msg::NextPane),
+        KeyCode::Enter => Some(Msg::Submit),
+        KeyCode::Backspace => Some(Msg::Backspace),
+        KeyCode::Up | KeyCode::Char('k') => Some(Msg::Navigate(DirectionKey::Up)),
+        KeyCode::Down | KeyCode::Char('j') => Some(Msg::Navigate(DirectionKey::Down)),
+        KeyCode::Left | KeyCode::Char('h') => Some(Msg::Navigate(DirectionKey::Left)),
+        KeyCode::Right | KeyCode::Char('l') => Some(Msg::Navigate(DirectionKey::Right)),
+        KeyCode::Char('1') => Some(Msg::InvokeActionSlot(0)),
+        KeyCode::Char('2') => Some(Msg::InvokeActionSlot(1)),
+        KeyCode::Char('3') => Some(Msg::InvokeActionSlot(2)),
+        KeyCode::Char('4') => Some(Msg::InvokeActionSlot(3)),
+        KeyCode::Char('5') => Some(Msg::InvokeActionSlot(4)),
+        KeyCode::Char('6') => Some(Msg::InvokeActionSlot(5)),
+        KeyCode::Char('7') => Some(Msg::InvokeActionSlot(6)),
+        KeyCode::Char(ch) => Some(Msg::InputChar(ch)),
         _ => None,
     }
 }
@@ -853,6 +1000,7 @@ mod tests {
 
     #[test]
     fn pane_cycles_in_expected_order() {
+        assert_eq!(Pane::ConnectionWizard.next(), Pane::SchemaExplorer);
         assert_eq!(Pane::SchemaExplorer.next(), Pane::Results);
         assert_eq!(Pane::Results.next(), Pane::QueryEditor);
         assert_eq!(Pane::QueryEditor.next(), Pane::SchemaExplorer);
@@ -876,6 +1024,10 @@ mod tests {
             map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Msg::CancelQuery)
         ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Msg::Submit)
+        ));
     }
 
     #[test]
@@ -894,5 +1046,13 @@ mod tests {
     fn limit_suggestion_is_applied_in_editor_helper() {
         let suggested = suggest_limit_in_editor("SELECT * FROM users");
         assert_eq!(suggested, Some("SELECT * FROM users LIMIT 200".to_string()));
+    }
+
+    #[test]
+    fn unmapped_chars_can_be_used_as_palette_input() {
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(Msg::InputChar('x'))
+        ));
     }
 }

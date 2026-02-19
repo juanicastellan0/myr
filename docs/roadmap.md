@@ -16,7 +16,7 @@
 
 ## M2: Guided exploration
 
-- [ ] Command palette (placeholder wired, fuzzy search pending)
+- [x] Command palette (search + keyboard invoke; fuzzy scoring can be improved)
 - [x] Safe mode confirmation flow (core guard implemented)
 - [x] Export CSV/JSON
 - [x] Describe/index/show-create actions
