@@ -6,6 +6,12 @@ use myr_core::connection_manager::ConnectionManager;
 use myr_core::profiles::ConnectionProfile;
 use myr_core::query_runner::{QueryBackend, QueryRowStream};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseOutcome {
+    Config,
+    HelpRequested,
+}
+
 #[derive(Debug, Clone)]
 struct BenchmarkConfig {
     profile_name: String,
@@ -233,14 +239,23 @@ fn peak_memory_bytes_best_effort() -> Option<u64> {
 
 fn parse_args() -> io::Result<BenchmarkConfig> {
     let mut config = BenchmarkConfig::default();
-    let mut args = std::env::args().skip(1);
+    let outcome = parse_args_from(std::env::args().skip(1), &mut config)?;
+    if outcome == ParseOutcome::HelpRequested {
+        print_help();
+        std::process::exit(0);
+    }
+    Ok(config)
+}
+
+fn parse_args_from(
+    args: impl IntoIterator<Item = String>,
+    config: &mut BenchmarkConfig,
+) -> io::Result<ParseOutcome> {
+    let mut args = args.into_iter();
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
-            "-h" | "--help" => {
-                print_help();
-                std::process::exit(0);
-            }
+            "-h" | "--help" => return Ok(ParseOutcome::HelpRequested),
             "--profile-name" => config.profile_name = next_value(&mut args, "--profile-name")?,
             "--host" => config.host = next_value(&mut args, "--host")?,
             "--port" => {
@@ -280,7 +295,7 @@ fn parse_args() -> io::Result<BenchmarkConfig> {
         }
     }
 
-    Ok(config)
+    Ok(ParseOutcome::Config)
 }
 
 fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> io::Result<String> {
@@ -299,4 +314,108 @@ Environment:\n  MYR_DB_PASSWORD is used for authentication.\n"
 
 fn io_other(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_insert_batch_sql, enforce_assertions, io_other, next_value, parse_args_from,
+        BenchmarkConfig, ParseOutcome,
+    };
+
+    #[test]
+    fn parse_args_from_applies_overrides() {
+        let mut config = BenchmarkConfig::default();
+        let outcome = parse_args_from(
+            vec![
+                "--profile-name".to_string(),
+                "ci-bench".to_string(),
+                "--host".to_string(),
+                "db".to_string(),
+                "--port".to_string(),
+                "33306".to_string(),
+                "--user".to_string(),
+                "bench_user".to_string(),
+                "--database".to_string(),
+                "bench_db".to_string(),
+                "--sql".to_string(),
+                "SELECT * FROM events LIMIT 100".to_string(),
+                "--seed-rows".to_string(),
+                "12345".to_string(),
+                "--assert-first-row-ms".to_string(),
+                "1500".to_string(),
+                "--assert-min-rows-per-sec".to_string(),
+                "4000".to_string(),
+            ],
+            &mut config,
+        )
+        .expect("parse should succeed");
+
+        assert_eq!(outcome, ParseOutcome::Config);
+        assert_eq!(config.profile_name, "ci-bench");
+        assert_eq!(config.host, "db");
+        assert_eq!(config.port, 33306);
+        assert_eq!(config.user, "bench_user");
+        assert_eq!(config.database, "bench_db");
+        assert_eq!(config.sql, "SELECT * FROM events LIMIT 100");
+        assert_eq!(config.seed_rows, 12345);
+        assert_eq!(config.assert_first_row_ms, Some(1500.0));
+        assert_eq!(config.assert_min_rows_per_sec, Some(4000.0));
+    }
+
+    #[test]
+    fn parse_args_from_detects_help() {
+        let mut config = BenchmarkConfig::default();
+        let outcome = parse_args_from(vec!["--help".to_string()], &mut config).expect("help parse");
+        assert_eq!(outcome, ParseOutcome::HelpRequested);
+    }
+
+    #[test]
+    fn parse_args_from_fails_for_unknown_flag() {
+        let mut config = BenchmarkConfig::default();
+        let err = parse_args_from(vec!["--bogus".to_string()], &mut config)
+            .expect_err("unknown flags should fail");
+        assert!(err.to_string().contains("unknown argument"));
+    }
+
+    #[test]
+    fn next_value_reports_missing_flag_values() {
+        let mut args = std::iter::empty::<String>();
+        let err = next_value(&mut args, "--port").expect_err("missing value should fail");
+        assert!(err.to_string().contains("missing value for `--port`"));
+    }
+
+    #[test]
+    fn build_insert_batch_sql_emits_expected_rows() {
+        let sql = build_insert_batch_sql(1, 3);
+        assert!(
+            sql.starts_with("INSERT INTO events (user_id, category, payload, created_at) VALUES ")
+        );
+        assert!(sql.contains("(2, 'play', 'payload-1', NOW() - INTERVAL 1 SECOND)"));
+        assert!(sql.contains("(3, 'pause', 'payload-2', NOW() - INTERVAL 2 SECOND)"));
+        assert!(sql.contains("(4, 'skip', 'payload-3', NOW() - INTERVAL 3 SECOND)"));
+    }
+
+    #[test]
+    fn enforce_assertions_validates_thresholds() {
+        let config = BenchmarkConfig {
+            assert_first_row_ms: Some(50.0),
+            assert_min_rows_per_sec: Some(10_000.0),
+            ..BenchmarkConfig::default()
+        };
+
+        let first_row_err =
+            enforce_assertions(&config, 51.0, 20_000.0).expect_err("first-row threshold");
+        assert!(first_row_err.to_string().contains("first row latency"));
+
+        let rows_per_sec_err =
+            enforce_assertions(&config, 20.0, 9_999.0).expect_err("throughput threshold");
+        assert!(rows_per_sec_err.to_string().contains("rows/sec"));
+    }
+
+    #[test]
+    fn io_other_uses_display_text() {
+        let err = io_other("boom");
+        assert_eq!(err.to_string(), "boom");
+    }
 }
