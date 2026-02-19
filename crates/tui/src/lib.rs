@@ -1790,7 +1790,7 @@ fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("Ctrl+P: command palette"),
         Line::from("Ctrl+U: clear current input"),
         Line::from("Ctrl+C: cancel active query"),
-        Line::from("Arrows or hjkl: navigation"),
+        Line::from("Arrows (or Alt+h/j/k/l): navigation"),
         Line::from("1..7: invoke ranked action slot"),
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"));
@@ -1934,6 +1934,16 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
         };
     }
 
+    if key.modifiers == KeyModifiers::ALT {
+        return match key.code {
+            KeyCode::Char('k') => Some(Msg::Navigate(DirectionKey::Up)),
+            KeyCode::Char('j') => Some(Msg::Navigate(DirectionKey::Down)),
+            KeyCode::Char('h') => Some(Msg::Navigate(DirectionKey::Left)),
+            KeyCode::Char('l') => Some(Msg::Navigate(DirectionKey::Right)),
+            _ => None,
+        };
+    }
+
     match key.code {
         KeyCode::Char('?') => Some(Msg::ToggleHelp),
         KeyCode::Esc => Some(Msg::TogglePalette),
@@ -1942,10 +1952,10 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
         KeyCode::F(3) => Some(Msg::ToggleSafeMode),
         KeyCode::Enter => Some(Msg::Submit),
         KeyCode::Backspace => Some(Msg::Backspace),
-        KeyCode::Up | KeyCode::Char('k') => Some(Msg::Navigate(DirectionKey::Up)),
-        KeyCode::Down | KeyCode::Char('j') => Some(Msg::Navigate(DirectionKey::Down)),
-        KeyCode::Left | KeyCode::Char('h') => Some(Msg::Navigate(DirectionKey::Left)),
-        KeyCode::Right | KeyCode::Char('l') => Some(Msg::Navigate(DirectionKey::Right)),
+        KeyCode::Up => Some(Msg::Navigate(DirectionKey::Up)),
+        KeyCode::Down => Some(Msg::Navigate(DirectionKey::Down)),
+        KeyCode::Left => Some(Msg::Navigate(DirectionKey::Left)),
+        KeyCode::Right => Some(Msg::Navigate(DirectionKey::Right)),
         KeyCode::Char('1') => Some(Msg::InvokeActionSlot(0)),
         KeyCode::Char('2') => Some(Msg::InvokeActionSlot(1)),
         KeyCode::Char('3') => Some(Msg::InvokeActionSlot(2)),
@@ -2015,6 +2025,22 @@ mod tests {
             Some(Msg::InputChar('q'))
         ));
         assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Some(Msg::InputChar('h'))
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(Msg::InputChar('j'))
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            Some(Msg::InputChar('k'))
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            Some(Msg::InputChar('l'))
+        ));
+        assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Some(Msg::NextPane)
         ));
@@ -2045,6 +2071,22 @@ mod tests {
         assert!(matches!(
             map_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
             Some(Msg::ToggleSafeMode)
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT)),
+            Some(Msg::Navigate(DirectionKey::Left))
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT)),
+            Some(Msg::Navigate(DirectionKey::Down))
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT)),
+            Some(Msg::Navigate(DirectionKey::Up))
+        ));
+        assert!(matches!(
+            map_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT)),
+            Some(Msg::Navigate(DirectionKey::Right))
         ));
     }
 
