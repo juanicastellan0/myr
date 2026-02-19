@@ -12,6 +12,9 @@ use crossterm::terminal::{
 use myr_core::actions_engine::{
     ActionContext, ActionInvocation, ActionsEngine, AppView, SchemaSelection,
 };
+use myr_core::profiles::{ConnectionProfile, FileProfilesStore};
+use myr_core::query_runner::QueryRow;
+use myr_core::results_buffer::ResultsRingBuffer;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -23,6 +26,9 @@ use thiserror::Error;
 const TICK_RATE: Duration = Duration::from_millis(120);
 const QUERY_DURATION_TICKS: u8 = 10;
 const FOOTER_ACTIONS_LIMIT: usize = 7;
+const RESULT_BUFFER_CAPACITY: usize = 2_000;
+
+const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
 
 #[derive(Debug, Error)]
 pub enum TuiError {
@@ -32,6 +38,7 @@ pub enum TuiError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pane {
+    ConnectionWizard,
     SchemaExplorer,
     Results,
     QueryEditor,
@@ -40,9 +47,64 @@ enum Pane {
 impl Pane {
     fn next(self) -> Self {
         match self {
+            Self::ConnectionWizard => Self::SchemaExplorer,
             Self::SchemaExplorer => Self::Results,
             Self::Results => Self::QueryEditor,
             Self::QueryEditor => Self::SchemaExplorer,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WizardField {
+    ProfileName,
+    Host,
+    Port,
+    User,
+    Database,
+}
+
+impl WizardField {
+    fn next(self) -> Self {
+        match self {
+            Self::ProfileName => Self::Host,
+            Self::Host => Self::Port,
+            Self::Port => Self::User,
+            Self::User => Self::Database,
+            Self::Database => Self::ProfileName,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ProfileName => "Profile",
+            Self::Host => "Host",
+            Self::Port => "Port",
+            Self::User => "User",
+            Self::Database => "Database",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectionWizardForm {
+    profile_name: String,
+    host: String,
+    port: String,
+    user: String,
+    database: String,
+    active_field: WizardField,
+}
+
+impl Default for ConnectionWizardForm {
+    fn default() -> Self {
+        Self {
+            profile_name: "local-dev".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: "3306".to_string(),
+            user: "root".to_string(),
+            database: "app".to_string(),
+            active_field: WizardField::ProfileName,
         }
     }
 }
@@ -61,6 +123,7 @@ enum Msg {
     ToggleHelp,
     NextPane,
     TogglePalette,
+    Submit,
     CancelQuery,
     Navigate(DirectionKey),
     InvokeActionSlot(usize),
@@ -71,12 +134,18 @@ enum Msg {
 struct TuiApp {
     actions: ActionsEngine,
     pane: Pane,
+    wizard_form: ConnectionWizardForm,
+    connected_profile: Option<String>,
+    schema_tables: Vec<String>,
+    selected_table_index: usize,
     show_help: bool,
     show_palette: bool,
     should_quit: bool,
     query_running: bool,
     query_ticks_remaining: u8,
     has_results: bool,
+    results_cursor: usize,
+    results: ResultsRingBuffer<QueryRow>,
     cancel_requested: bool,
     status_line: String,
     query_editor_text: String,
@@ -87,19 +156,28 @@ impl Default for TuiApp {
     fn default() -> Self {
         Self {
             actions: ActionsEngine::new(),
-            pane: Pane::SchemaExplorer,
+            pane: Pane::ConnectionWizard,
+            wizard_form: ConnectionWizardForm::default(),
+            connected_profile: None,
+            schema_tables: DEMO_SCHEMA_TABLES
+                .iter()
+                .map(|table| (*table).to_string())
+                .collect(),
+            selected_table_index: 0,
             show_help: false,
             show_palette: false,
             should_quit: false,
             query_running: false,
             query_ticks_remaining: 0,
             has_results: false,
+            results_cursor: 0,
+            results: ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY),
             cancel_requested: false,
-            status_line: "Ready".to_string(),
+            status_line: "Fill connection details and press Enter to connect".to_string(),
             query_editor_text: "SELECT * FROM users".to_string(),
             selection: SchemaSelection {
-                database: Some("app".to_string()),
-                table: Some("users".to_string()),
+                database: None,
+                table: None,
                 column: Some("email".to_string()),
             },
         }
@@ -112,8 +190,14 @@ impl TuiApp {
             Msg::Quit => self.should_quit = true,
             Msg::ToggleHelp => self.show_help = !self.show_help,
             Msg::NextPane => {
-                self.pane = self.pane.next();
-                self.status_line = format!("Switched pane to {}", self.pane_name());
+                if self.pane == Pane::ConnectionWizard {
+                    self.wizard_form.active_field = self.wizard_form.active_field.next();
+                    self.status_line =
+                        format!("Wizard field: {}", self.wizard_form.active_field.label());
+                } else {
+                    self.pane = self.pane.next();
+                    self.status_line = format!("Switched pane to {}", self.pane_name());
+                }
             }
             Msg::TogglePalette => {
                 self.show_palette = !self.show_palette;
@@ -123,15 +207,14 @@ impl TuiApp {
                     "Command palette closed".to_string()
                 };
             }
+            Msg::Submit => self.submit(),
             Msg::CancelQuery => {
                 self.cancel_requested = true;
                 self.query_running = false;
                 self.query_ticks_remaining = 0;
                 self.status_line = "Cancel requested".to_string();
             }
-            Msg::Navigate(direction) => {
-                self.status_line = format!("Navigation: {direction:?}");
-            }
+            Msg::Navigate(direction) => self.navigate(direction),
             Msg::InvokeActionSlot(index) => self.invoke_ranked_action(index),
             Msg::Tick => self.on_tick(),
         }
@@ -141,12 +224,169 @@ impl TuiApp {
         if self.query_running {
             if self.query_ticks_remaining == 0 {
                 self.query_running = false;
-                self.has_results = true;
+                self.populate_demo_results();
                 self.status_line = "Query completed".to_string();
             } else {
                 self.query_ticks_remaining = self.query_ticks_remaining.saturating_sub(1);
             }
         }
+    }
+
+    fn submit(&mut self) {
+        match self.pane {
+            Pane::ConnectionWizard => self.connect_from_wizard(),
+            Pane::QueryEditor => {
+                let context = self.action_context();
+                match self.actions.invoke(
+                    myr_core::actions_engine::ActionId::RunCurrentQuery,
+                    &context,
+                ) {
+                    Ok(invocation) => self.apply_invocation(invocation),
+                    Err(error) => self.status_line = format!("Run query failed: {error}"),
+                }
+            }
+            Pane::SchemaExplorer | Pane::Results => {
+                self.status_line = "Nothing to submit in this view".to_string();
+            }
+        }
+    }
+
+    fn connect_from_wizard(&mut self) {
+        let port = match self.wizard_form.port.parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                self.status_line = "Invalid port in connection wizard".to_string();
+                return;
+            }
+        };
+
+        let mut profile = ConnectionProfile::new(
+            self.wizard_form.profile_name.clone(),
+            self.wizard_form.host.clone(),
+            self.wizard_form.user.clone(),
+        );
+        profile.port = port;
+        profile.database = Some(self.wizard_form.database.clone());
+
+        match FileProfilesStore::load_default() {
+            Ok(mut store) => {
+                store.upsert_profile(profile.clone());
+                if let Err(error) = store.persist() {
+                    self.status_line = format!("Connected (profile save failed: {error})");
+                } else {
+                    self.status_line = format!("Connected as profile `{}`", profile.name);
+                }
+            }
+            Err(error) => {
+                self.status_line = format!("Connected (profile load failed: {error})");
+            }
+        }
+
+        self.connected_profile = Some(profile.name.clone());
+        self.selection.database = profile.database;
+        self.selected_table_index = 0;
+        self.selection.table = self.schema_tables.first().cloned();
+        self.selection.column = Some("id".to_string());
+        if let Some(table) = &self.selection.table {
+            self.query_editor_text = format!("SELECT * FROM `{}`", table.replace('`', "``"));
+        }
+        self.pane = Pane::SchemaExplorer;
+    }
+
+    fn navigate(&mut self, direction: DirectionKey) {
+        match self.pane {
+            Pane::ConnectionWizard => {
+                if matches!(direction, DirectionKey::Left | DirectionKey::Up) {
+                    self.wizard_form.active_field = self.previous_wizard_field();
+                } else {
+                    self.wizard_form.active_field = self.wizard_form.active_field.next();
+                }
+                self.status_line =
+                    format!("Wizard field: {}", self.wizard_form.active_field.label());
+            }
+            Pane::SchemaExplorer => self.navigate_schema(direction),
+            Pane::Results => self.navigate_results(direction),
+            Pane::QueryEditor => {
+                self.status_line = format!("Navigation in editor: {direction:?}");
+            }
+        }
+    }
+
+    fn previous_wizard_field(&self) -> WizardField {
+        match self.wizard_form.active_field {
+            WizardField::ProfileName => WizardField::Database,
+            WizardField::Host => WizardField::ProfileName,
+            WizardField::Port => WizardField::Host,
+            WizardField::User => WizardField::Port,
+            WizardField::Database => WizardField::User,
+        }
+    }
+
+    fn navigate_schema(&mut self, direction: DirectionKey) {
+        if self.schema_tables.is_empty() {
+            self.status_line = "No tables available".to_string();
+            return;
+        }
+
+        match direction {
+            DirectionKey::Up | DirectionKey::Left => {
+                self.selected_table_index = self.selected_table_index.saturating_sub(1);
+            }
+            DirectionKey::Down | DirectionKey::Right => {
+                let max_index = self.schema_tables.len() - 1;
+                self.selected_table_index = (self.selected_table_index + 1).min(max_index);
+            }
+        }
+
+        self.selection.table = self.schema_tables.get(self.selected_table_index).cloned();
+        if let Some(table) = &self.selection.table {
+            self.status_line = format!("Selected table `{table}`");
+        }
+    }
+
+    fn navigate_results(&mut self, direction: DirectionKey) {
+        let row_count = self.results.len();
+        if row_count == 0 {
+            self.status_line = "No buffered rows yet".to_string();
+            return;
+        }
+
+        match direction {
+            DirectionKey::Up | DirectionKey::Left => {
+                self.results_cursor = self.results_cursor.saturating_sub(1);
+            }
+            DirectionKey::Down | DirectionKey::Right => {
+                self.results_cursor = (self.results_cursor + 1).min(row_count.saturating_sub(1));
+            }
+        }
+
+        self.status_line = format!(
+            "Results cursor: {} / {}",
+            self.results_cursor + 1,
+            row_count
+        );
+    }
+
+    fn populate_demo_results(&mut self) {
+        self.results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
+        self.results_cursor = 0;
+
+        let selected_table = self
+            .selection
+            .table
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        for index in 1..=500 {
+            let row = QueryRow::new(vec![
+                index.to_string(),
+                format!("{selected_table}-value-{index}"),
+                format!("2026-02-{day:02}", day = ((index - 1) % 28) + 1),
+            ]);
+            self.results.push(row);
+        }
+
+        self.has_results = true;
+        self.selection.column = Some("value".to_string());
     }
 
     fn invoke_ranked_action(&mut self, index: usize) {
@@ -169,6 +409,7 @@ impl TuiApp {
                 self.query_running = true;
                 self.query_ticks_remaining = QUERY_DURATION_TICKS;
                 self.cancel_requested = false;
+                self.has_results = false;
                 self.query_editor_text = sql;
                 self.pane = Pane::Results;
                 self.status_line = "Running query...".to_string();
@@ -191,10 +432,11 @@ impl TuiApp {
             }
             ActionInvocation::OpenView(view) => {
                 self.pane = match view {
+                    AppView::ConnectionWizard => Pane::ConnectionWizard,
                     AppView::SchemaExplorer => Pane::SchemaExplorer,
                     AppView::Results => Pane::Results,
                     AppView::QueryEditor => Pane::QueryEditor,
-                    AppView::ConnectionWizard | AppView::CommandPalette => self.pane,
+                    AppView::CommandPalette => self.pane,
                 };
                 self.status_line = format!("Switched view to {}", self.pane_name());
             }
@@ -206,6 +448,7 @@ impl TuiApp {
 
     fn action_context(&self) -> ActionContext {
         let view = match self.pane {
+            Pane::ConnectionWizard => AppView::ConnectionWizard,
             Pane::SchemaExplorer => AppView::SchemaExplorer,
             Pane::Results => AppView::Results,
             Pane::QueryEditor => AppView::QueryEditor,
@@ -228,6 +471,7 @@ impl TuiApp {
 
     fn pane_name(&self) -> &'static str {
         match self.pane {
+            Pane::ConnectionWizard => "Connection Wizard",
             Pane::SchemaExplorer => "Schema Explorer",
             Pane::Results => "Results",
             Pane::QueryEditor => "Query Editor",
@@ -327,6 +571,16 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         ),
         Span::raw(" | "),
         Span::raw(format!(
+            "Profile: {}",
+            app.connected_profile.as_deref().unwrap_or("not connected")
+        )),
+        Span::raw(" | "),
+        Span::raw(format!(
+            "DB: {}",
+            app.selection.database.as_deref().unwrap_or("-")
+        )),
+        Span::raw(" | "),
+        Span::raw(format!(
             "SAFE mode: {}",
             if app.cancel_requested {
                 "cancel requested"
@@ -353,22 +607,90 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     frame.render_widget(header, chunks[0]);
 
     let body_text = match app.pane {
-        Pane::SchemaExplorer => vec![
-            Line::from("Schema Explorer"),
-            Line::from("Selected: app.users"),
-            Line::from("Use Tab to cycle panes."),
-            Line::from("Press 1..7 to invoke ranked next actions."),
-        ],
-        Pane::Results => vec![
-            Line::from("Results View"),
-            Line::from("Virtualized results placeholder"),
-            Line::from("Use arrows / hjkl to navigate."),
-            Line::from("Export and copy actions are available when results exist."),
-        ],
+        Pane::ConnectionWizard => {
+            let fields = [
+                (
+                    WizardField::ProfileName,
+                    "Profile",
+                    app.wizard_form.profile_name.as_str(),
+                ),
+                (WizardField::Host, "Host", app.wizard_form.host.as_str()),
+                (WizardField::Port, "Port", app.wizard_form.port.as_str()),
+                (WizardField::User, "User", app.wizard_form.user.as_str()),
+                (
+                    WizardField::Database,
+                    "Database",
+                    app.wizard_form.database.as_str(),
+                ),
+            ];
+
+            let mut lines = vec![
+                Line::from("Connection Wizard"),
+                Line::from("Enter: connect and save profile"),
+                Line::from("Tab / arrows: switch field"),
+                Line::from(""),
+            ];
+            for (field, label, value) in fields {
+                let marker = if app.wizard_form.active_field == field {
+                    ">"
+                } else {
+                    " "
+                };
+                lines.push(Line::from(format!("{marker} {label}: {value}")));
+            }
+            lines
+        }
+        Pane::SchemaExplorer => {
+            let mut lines = vec![
+                Line::from("Schema Explorer"),
+                Line::from("Use arrows / hjkl to select table."),
+                Line::from("Press 1 for preview action."),
+                Line::from(""),
+            ];
+
+            for (index, table) in app.schema_tables.iter().enumerate() {
+                let marker = if index == app.selected_table_index {
+                    ">"
+                } else {
+                    " "
+                };
+                lines.push(Line::from(format!("{marker} {table}")));
+            }
+            lines
+        }
+        Pane::Results => {
+            let visible_limit = usize::from(chunks[1].height.saturating_sub(3)).max(1);
+            let window_start = app.results_cursor.saturating_sub(visible_limit / 2);
+            let rows = app.results.visible_rows(window_start, visible_limit);
+
+            let mut lines = vec![
+                Line::from("Results View (virtualized)"),
+                Line::from("Use arrows / hjkl to move cursor."),
+            ];
+
+            for (offset, row) in rows.into_iter().enumerate() {
+                let absolute_index = window_start + offset;
+                let cursor = if absolute_index == app.results_cursor {
+                    ">"
+                } else {
+                    " "
+                };
+                lines.push(Line::from(format!(
+                    "{cursor} {:04} | {}",
+                    absolute_index + 1,
+                    row.values.join(" | ")
+                )));
+            }
+
+            if lines.len() == 2 {
+                lines.push(Line::from("No rows buffered"));
+            }
+            lines
+        }
         Pane::QueryEditor => vec![
             Line::from("Query Editor"),
             Line::from(app.query_editor_text.as_str()),
-            Line::from("Run query and LIMIT suggestion actions are context-aware."),
+            Line::from("Enter to run query, 1..7 for ranked actions."),
             Line::from("Ctrl+P opens palette placeholder."),
         ],
     };
@@ -411,6 +733,7 @@ fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("q: quit"),
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
+        Line::from("Enter: connect or run query (by view)"),
         Line::from("Ctrl+P: command palette placeholder"),
         Line::from("Ctrl+C: cancel active query"),
         Line::from("Arrows or hjkl: navigation"),
@@ -445,6 +768,7 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
         (_, KeyCode::Char('q')) => Some(Msg::Quit),
         (_, KeyCode::Char('?')) => Some(Msg::ToggleHelp),
         (_, KeyCode::Tab) => Some(Msg::NextPane),
+        (_, KeyCode::Enter) => Some(Msg::Submit),
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => Some(Msg::TogglePalette),
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => Some(Msg::CancelQuery),
         (_, KeyCode::Up | KeyCode::Char('k')) => Some(Msg::Navigate(DirectionKey::Up)),
