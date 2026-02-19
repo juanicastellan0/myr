@@ -2,6 +2,7 @@ pub mod connection_manager;
 pub mod profiles;
 pub mod query_runner;
 pub mod results_buffer;
+pub mod safe_mode;
 pub mod schema_cache;
 pub mod sql_generator;
 
