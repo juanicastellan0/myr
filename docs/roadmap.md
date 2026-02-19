@@ -8,18 +8,18 @@
 
 ## M1: Explorer MVP
 
-- [ ] Connection profiles and connection wizard
+- [x] Connection profiles and connection wizard (initial implementation)
 - [ ] Schema explorer (databases, tables, columns)
-- [ ] Table preview action
-- [ ] Streaming results with bounded buffer
-- [ ] Context-aware next actions footer
+- [x] Table preview action
+- [x] Streaming results with bounded buffer
+- [x] Context-aware next actions footer
 
 ## M2: Guided exploration
 
-- [ ] Command palette
-- [ ] Safe mode confirmation flow
-- [ ] Export CSV/JSON
-- [ ] Describe/index/show-create actions
+- [ ] Command palette (placeholder wired, fuzzy search pending)
+- [x] Safe mode confirmation flow (core guard implemented)
+- [x] Export CSV/JSON
+- [x] Describe/index/show-create actions
 
 ## M3: Big-table competence
 

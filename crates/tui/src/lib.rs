@@ -1,4 +1,5 @@
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -9,6 +10,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use myr_adapters::export::{export_rows_to_csv, export_rows_to_json};
 use myr_core::actions_engine::{
     ActionContext, ActionInvocation, ActionsEngine, AppView, SchemaSelection,
 };
@@ -144,6 +146,7 @@ struct TuiApp {
     query_running: bool,
     query_ticks_remaining: u8,
     has_results: bool,
+    result_columns: Vec<String>,
     results_cursor: usize,
     results: ResultsRingBuffer<QueryRow>,
     cancel_requested: bool,
@@ -170,6 +173,11 @@ impl Default for TuiApp {
             query_running: false,
             query_ticks_remaining: 0,
             has_results: false,
+            result_columns: vec![
+                "id".to_string(),
+                "value".to_string(),
+                "observed_at".to_string(),
+            ],
             results_cursor: 0,
             results: ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY),
             cancel_requested: false,
@@ -370,6 +378,11 @@ impl TuiApp {
     fn populate_demo_results(&mut self) {
         self.results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
         self.results_cursor = 0;
+        self.result_columns = vec![
+            "id".to_string(),
+            "value".to_string(),
+            "observed_at".to_string(),
+        ];
 
         let selected_table = self
             .selection
@@ -387,6 +400,40 @@ impl TuiApp {
 
         self.has_results = true;
         self.selection.column = Some("value".to_string());
+    }
+
+    fn export_results(&mut self, format: myr_core::actions_engine::ExportFormat) {
+        if !self.has_results || self.results.is_empty() {
+            self.status_line = "No results available to export".to_string();
+            return;
+        }
+
+        let rows = (0..self.results.len())
+            .filter_map(|index| self.results.get(index))
+            .map(|row| row.values.clone())
+            .collect::<Vec<_>>();
+        let file_path = export_file_path(match format {
+            myr_core::actions_engine::ExportFormat::Csv => "csv",
+            myr_core::actions_engine::ExportFormat::Json => "json",
+        });
+
+        let result = match format {
+            myr_core::actions_engine::ExportFormat::Csv => {
+                export_rows_to_csv(&file_path, &self.result_columns, &rows)
+            }
+            myr_core::actions_engine::ExportFormat::Json => {
+                export_rows_to_json(&file_path, &self.result_columns, &rows)
+            }
+        };
+
+        match result {
+            Ok(row_count) => {
+                self.status_line = format!("Exported {row_count} rows to {}", file_path.display());
+            }
+            Err(error) => {
+                self.status_line = format!("Export failed: {error}");
+            }
+        }
     }
 
     fn invoke_ranked_action(&mut self, index: usize) {
@@ -425,7 +472,7 @@ impl TuiApp {
                 self.status_line = "Query cancelled".to_string();
             }
             ActionInvocation::ExportResults(format) => {
-                self.status_line = format!("Export requested: {format:?}");
+                self.export_results(format);
             }
             ActionInvocation::CopyToClipboard(target) => {
                 self.status_line = format!("Copy requested: {target:?}");
@@ -761,6 +808,13 @@ fn centered_rect(width_percent: u16, height_percent: u16, area: Rect) -> Rect {
             Constraint::Percentage((100_u16 - width_percent) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+fn export_file_path(extension: &str) -> PathBuf {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    std::env::temp_dir().join(format!("myr-export-{timestamp}.{extension}"))
 }
 
 fn map_key_event(key: KeyEvent) -> Option<Msg> {

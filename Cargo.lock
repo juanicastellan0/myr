@@ -325,6 +325,11 @@ dependencies = [
 [[package]]
 name = "myr-adapters"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "myr-app"
@@ -352,6 +357,7 @@ name = "myr-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "myr-adapters",
  "myr-core",
  "ratatui",
  "thiserror",
