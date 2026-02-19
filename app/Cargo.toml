@@ -1,0 +1,10 @@
+[package]
+name = "myr-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+myr-core = { path = "../crates/core" }
+myr-tui = { path = "../crates/tui" }
+myr-adapters = { path = "../crates/adapters" }
