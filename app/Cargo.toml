@@ -3,6 +3,7 @@ name = "myr-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "myr-app"
 
 [dependencies]
 myr-core = { path = "../crates/core" }
