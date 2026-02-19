@@ -28,6 +28,14 @@ Project bootstrap complete. The detailed product backlog is in `fast-mysql-tui-e
 - Passwords are read from the `MYR_DB_PASSWORD` environment variable.
 - Schema/table loading and query execution use the live adapter when connected.
 
+## Benchmark Quickstart
+
+- Start local benchmark DB: `docker compose -f bench/docker-compose.yml up -d --wait`
+- Run benchmark runner:
+  - `MYR_DB_PASSWORD=root cargo run -p myr-app --bin benchmark -- --host 127.0.0.1 --port 33306 --user root --database myr_bench --seed-rows 50000`
+- One-command setup/run/teardown:
+  - `bench/scripts/run_benchmark.sh`
+
 ## License
 
 MIT (`LICENSE`).

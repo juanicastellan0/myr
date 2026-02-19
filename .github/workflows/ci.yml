@@ -37,6 +37,46 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --all-features
 
+  perf-smoke:
+    name: Perf smoke (MySQL benchmark)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: myr_bench
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    env:
+      MYR_DB_PASSWORD: root
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmark smoke check
+        run: |
+          cargo run -p myr-app --bin benchmark -- \
+            --host 127.0.0.1 \
+            --port 3306 \
+            --user root \
+            --database myr_bench \
+            --seed-rows 10000 \
+            --sql "SELECT id, user_id, category, payload, created_at FROM events ORDER BY id LIMIT 10000" \
+            --assert-first-row-ms 5000 \
+            --assert-min-rows-per-sec 500
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

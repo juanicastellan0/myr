@@ -8,3 +8,4 @@ license.workspace = true
 myr-core = { path = "../crates/core" }
 myr-tui = { path = "../crates/tui" }
 myr-adapters = { path = "../crates/adapters" }
+tokio = { version = "1", features = ["macros", "rt"] }

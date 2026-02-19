@@ -1,0 +1,302 @@
+use std::io;
+use std::time::{Duration, Instant};
+
+use myr_adapters::mysql::{MysqlConnectionBackend, MysqlDataBackend};
+use myr_core::connection_manager::ConnectionManager;
+use myr_core::profiles::ConnectionProfile;
+use myr_core::query_runner::{QueryBackend, QueryRowStream};
+
+#[derive(Debug, Clone)]
+struct BenchmarkConfig {
+    profile_name: String,
+    host: String,
+    port: u16,
+    user: String,
+    database: String,
+    sql: String,
+    seed_rows: u64,
+    assert_first_row_ms: Option<f64>,
+    assert_min_rows_per_sec: Option<f64>,
+}
+
+impl Default for BenchmarkConfig {
+    fn default() -> Self {
+        Self {
+            profile_name: "bench-local".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 3306,
+            user: "root".to_string(),
+            database: "myr_bench".to_string(),
+            sql: "SELECT id, user_id, category, payload, created_at FROM events ORDER BY id LIMIT 20000"
+                .to_string(),
+            seed_rows: 0,
+            assert_first_row_ms: None,
+            assert_min_rows_per_sec: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QueryMetrics {
+    rows_streamed: u64,
+    first_row: Option<Duration>,
+    elapsed: Duration,
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_args()?;
+    let mut profile = ConnectionProfile::new(
+        config.profile_name.clone(),
+        config.host.clone(),
+        config.user.clone(),
+    );
+    profile.port = config.port;
+    profile.database = Some(config.database.clone());
+
+    let mut manager = ConnectionManager::new(MysqlConnectionBackend);
+    let connect_latency = manager.connect(profile.clone()).await.map_err(io_other)?;
+
+    let data_backend = MysqlDataBackend::from_profile(&profile);
+    if config.seed_rows > 0 {
+        ensure_seed_data(&data_backend, config.seed_rows).await?;
+    }
+
+    let metrics = run_query_benchmark(&data_backend, &config.sql).await?;
+    let rows_per_sec = if metrics.elapsed.as_secs_f64() > 0.0 {
+        metrics.rows_streamed as f64 / metrics.elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    let first_row_ms = metrics
+        .first_row
+        .map_or(0.0, |duration| duration.as_secs_f64() * 1_000.0);
+    let elapsed_ms = metrics.elapsed.as_secs_f64() * 1_000.0;
+
+    println!(
+        "metric.connect_ms={:.3}",
+        connect_latency.as_secs_f64() * 1_000.0
+    );
+    println!("metric.first_row_ms={first_row_ms:.3}");
+    println!("metric.rows_streamed={}", metrics.rows_streamed);
+    println!("metric.stream_elapsed_ms={elapsed_ms:.3}");
+    println!("metric.rows_per_sec={rows_per_sec:.3}");
+    if let Some(bytes) = peak_memory_bytes_best_effort() {
+        println!("metric.peak_memory_bytes={bytes}");
+    } else {
+        println!("metric.peak_memory_bytes=n/a");
+    }
+
+    enforce_assertions(&config, first_row_ms, rows_per_sec)?;
+
+    manager.disconnect().await.map_err(io_other)?;
+    data_backend.disconnect().await.map_err(io_other)?;
+
+    Ok(())
+}
+
+async fn run_query_benchmark(backend: &MysqlDataBackend, sql: &str) -> io::Result<QueryMetrics> {
+    let mut stream = backend.start_query(sql).await.map_err(io_other)?;
+    let started_at = Instant::now();
+    let mut first_row = None;
+    let mut rows_streamed = 0_u64;
+
+    while let Some(_row) = stream.next_row().await.map_err(io_other)? {
+        rows_streamed += 1;
+        if first_row.is_none() {
+            first_row = Some(started_at.elapsed());
+        }
+    }
+
+    Ok(QueryMetrics {
+        rows_streamed,
+        first_row,
+        elapsed: started_at.elapsed(),
+    })
+}
+
+async fn ensure_seed_data(backend: &MysqlDataBackend, target_rows: u64) -> io::Result<()> {
+    execute_sql(
+        backend,
+        "CREATE TABLE IF NOT EXISTS events (\
+         id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,\
+         user_id INT NOT NULL,\
+         category VARCHAR(32) NOT NULL,\
+         payload VARCHAR(128) NOT NULL,\
+         created_at DATETIME NOT NULL,\
+         KEY idx_created_at (created_at),\
+         KEY idx_user_id_id (user_id, id)\
+         )",
+    )
+    .await?;
+
+    let existing_rows = query_scalar_u64(backend, "SELECT COUNT(*) FROM events").await?;
+    if existing_rows >= target_rows {
+        return Ok(());
+    }
+
+    let mut next = existing_rows + 1;
+    while next <= target_rows {
+        let end = (next + 999).min(target_rows);
+        execute_sql(backend, &build_insert_batch_sql(next, end)).await?;
+        next = end + 1;
+    }
+
+    Ok(())
+}
+
+async fn execute_sql(backend: &MysqlDataBackend, sql: &str) -> io::Result<()> {
+    let mut stream = backend.start_query(sql).await.map_err(io_other)?;
+    while stream.next_row().await.map_err(io_other)?.is_some() {}
+    Ok(())
+}
+
+async fn query_scalar_u64(backend: &MysqlDataBackend, sql: &str) -> io::Result<u64> {
+    let mut stream = backend.start_query(sql).await.map_err(io_other)?;
+    let row = stream
+        .next_row()
+        .await
+        .map_err(io_other)?
+        .ok_or_else(|| io_other("query returned no rows"))?;
+    let value = row
+        .values
+        .first()
+        .ok_or_else(|| io_other("query returned no columns"))?;
+    value
+        .parse::<u64>()
+        .map_err(|error| io_other(format!("failed to parse scalar value `{value}`: {error}")))
+}
+
+fn build_insert_batch_sql(start: u64, end: u64) -> String {
+    let mut values = Vec::with_capacity((end - start + 1) as usize);
+    for index in start..=end {
+        let user_id = (index % 5_000) + 1;
+        let category = match index % 5 {
+            0 => "search",
+            1 => "play",
+            2 => "pause",
+            3 => "skip",
+            _ => "share",
+        };
+        let payload = format!("payload-{index}");
+        let created_offset = index % 86_400;
+        values.push(format!(
+            "({user_id}, '{category}', '{payload}', NOW() - INTERVAL {created_offset} SECOND)"
+        ));
+    }
+
+    format!(
+        "INSERT INTO events (user_id, category, payload, created_at) VALUES {}",
+        values.join(",")
+    )
+}
+
+fn enforce_assertions(
+    config: &BenchmarkConfig,
+    first_row_ms: f64,
+    rows_per_sec: f64,
+) -> io::Result<()> {
+    if let Some(max_first_row_ms) = config.assert_first_row_ms {
+        if first_row_ms > max_first_row_ms {
+            return Err(io_other(format!(
+                "first row latency {:.3}ms exceeded threshold {:.3}ms",
+                first_row_ms, max_first_row_ms
+            )));
+        }
+    }
+
+    if let Some(min_rows_per_sec) = config.assert_min_rows_per_sec {
+        if rows_per_sec < min_rows_per_sec {
+            return Err(io_other(format!(
+                "rows/sec {:.3} below threshold {:.3}",
+                rows_per_sec, min_rows_per_sec
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn peak_memory_bytes_best_effort() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/self/status").ok()?;
+    let vm_hwm_line = contents.lines().find(|line| line.starts_with("VmHWM:"))?;
+    let kb = vm_hwm_line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    Some(kb * 1_024)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peak_memory_bytes_best_effort() -> Option<u64> {
+    None
+}
+
+fn parse_args() -> io::Result<BenchmarkConfig> {
+    let mut config = BenchmarkConfig::default();
+    let mut args = std::env::args().skip(1);
+
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "-h" | "--help" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "--profile-name" => config.profile_name = next_value(&mut args, "--profile-name")?,
+            "--host" => config.host = next_value(&mut args, "--host")?,
+            "--port" => {
+                config.port = next_value(&mut args, "--port")?
+                    .parse::<u16>()
+                    .map_err(|error| io_other(format!("invalid --port value: {error}")))?;
+            }
+            "--user" => config.user = next_value(&mut args, "--user")?,
+            "--database" => config.database = next_value(&mut args, "--database")?,
+            "--sql" => config.sql = next_value(&mut args, "--sql")?,
+            "--seed-rows" => {
+                config.seed_rows = next_value(&mut args, "--seed-rows")?
+                    .parse::<u64>()
+                    .map_err(|error| io_other(format!("invalid --seed-rows value: {error}")))?;
+            }
+            "--assert-first-row-ms" => {
+                config.assert_first_row_ms = Some(
+                    next_value(&mut args, "--assert-first-row-ms")?
+                        .parse::<f64>()
+                        .map_err(|error| {
+                            io_other(format!("invalid --assert-first-row-ms value: {error}"))
+                        })?,
+                );
+            }
+            "--assert-min-rows-per-sec" => {
+                config.assert_min_rows_per_sec = Some(
+                    next_value(&mut args, "--assert-min-rows-per-sec")?
+                        .parse::<f64>()
+                        .map_err(|error| {
+                            io_other(format!("invalid --assert-min-rows-per-sec value: {error}"))
+                        })?,
+                );
+            }
+            _ => {
+                return Err(io_other(format!("unknown argument `{flag}`")));
+            }
+        }
+    }
+
+    Ok(config)
+}
+
+fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> io::Result<String> {
+    args.next()
+        .ok_or_else(|| io_other(format!("missing value for `{flag}`")))
+}
+
+fn print_help() {
+    println!(
+        "myr benchmark runner\n\n\
+Usage:\n  cargo run -p myr-app --bin benchmark -- [OPTIONS]\n\n\
+Options:\n  --profile-name <name>           Profile name used for connection manager (default: bench-local)\n  --host <host>                   MySQL host (default: 127.0.0.1)\n  --port <port>                   MySQL port (default: 3306)\n  --user <user>                   MySQL user (default: root)\n  --database <name>               Database name (default: myr_bench)\n  --sql <query>                   Query to benchmark\n  --seed-rows <count>             Seed `events` table up to count rows before benchmark\n  --assert-first-row-ms <ms>      Fail if first-row latency exceeds threshold\n  --assert-min-rows-per-sec <rps> Fail if throughput is below threshold\n\n\
+Environment:\n  MYR_DB_PASSWORD is used for authentication.\n"
+    );
+}
+
+fn io_other(error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(error.to_string())
+}

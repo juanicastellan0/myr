@@ -25,7 +25,7 @@
 
 - [ ] Pagination strategy (keyset + fallback)
 - [x] Performance instrumentation overlay
-- [ ] Benchmark scripts and regression checks
+- [x] Benchmark scripts and regression checks
 
 ## M4: Stable release
 

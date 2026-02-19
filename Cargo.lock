@@ -837,6 +837,7 @@ dependencies = [
  "myr-adapters",
  "myr-core",
  "myr-tui",
+ "tokio",
 ]
 
 [[package]]

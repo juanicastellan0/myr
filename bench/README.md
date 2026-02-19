@@ -1,8 +1,63 @@
 # Bench
 
-Benchmark and dataset tooling will live here.
+Benchmark and perf-regression tooling for local and CI checks.
 
-Planned additions:
-- docker compose setup
-- dataset generator
-- perf regression scripts
+## Local DB Harness
+
+A local MySQL benchmark instance is defined in `bench/docker-compose.yml`.
+
+Start it manually:
+
+```bash
+docker compose -f bench/docker-compose.yml up -d --wait
+```
+
+Stop and remove data:
+
+```bash
+docker compose -f bench/docker-compose.yml down -v
+```
+
+## Benchmark Runner
+
+The benchmark runner is `myr-app` binary target `benchmark`:
+
+```bash
+export MYR_DB_PASSWORD=root
+cargo run -p myr-app --bin benchmark -- \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench \
+  --seed-rows 50000 \
+  --sql "SELECT id, user_id, category, payload, created_at FROM events ORDER BY id LIMIT 50000"
+```
+
+Reported metrics:
+- `metric.connect_ms`
+- `metric.first_row_ms`
+- `metric.rows_streamed`
+- `metric.stream_elapsed_ms`
+- `metric.rows_per_sec`
+- `metric.peak_memory_bytes` (Linux best effort via `/proc/self/status`)
+
+Optional regression gates are built in:
+
+```bash
+cargo run -p myr-app --bin benchmark -- \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench \
+  --seed-rows 10000 \
+  --assert-first-row-ms 4000 \
+  --assert-min-rows-per-sec 2000
+```
+
+## One-command Local Run
+
+`bench/scripts/run_benchmark.sh` boots MySQL, runs the benchmark, then tears down the DB:
+
+```bash
+bench/scripts/run_benchmark.sh
+```
