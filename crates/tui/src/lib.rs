@@ -1775,11 +1775,35 @@ fn suggest_limit_in_editor(query: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use myr_core::actions_engine::CopyTarget;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     use super::{
-        candidate_key_column, extract_key_bounds, map_key_event, suggest_limit_in_editor,
-        DirectionKey, Msg, Pane, QueryRow, ResultsRingBuffer, SchemaLane, TuiApp,
+        candidate_key_column, centered_rect, extract_key_bounds, map_key_event, quote_identifier,
+        render, suggest_limit_in_editor, ActionId, ActionInvocation, AppView, DirectionKey, Msg,
+        PaginationPlan, Pane, QueryRow, ResultsRingBuffer, SchemaLane, TuiApp,
+        QUERY_DURATION_TICKS,
     };
+
+    fn app_in_pane(pane: Pane) -> TuiApp {
+        TuiApp {
+            pane,
+            ..TuiApp::default()
+        }
+    }
+
+    fn drive_demo_query_to_completion(app: &mut TuiApp) {
+        for _ in 0..=QUERY_DURATION_TICKS {
+            app.on_tick();
+        }
+    }
+
+    fn render_once(app: &TuiApp) {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| render(frame, app)).expect("render");
+    }
 
     #[test]
     fn pane_cycles_in_expected_order() {
@@ -1905,5 +1929,259 @@ mod tests {
         let columns = vec!["id".to_string(), "payload".to_string()];
         let bounds = extract_key_bounds(&results, &columns, "id");
         assert_eq!(bounds, (Some("10".to_string()), Some("12".to_string())));
+    }
+
+    #[test]
+    fn submit_runs_query_in_demo_mode_and_populates_results() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+        app.query_editor_text = "SELECT * FROM `app`.`users`".to_string();
+
+        app.submit();
+        assert!(app.query_running);
+        assert_eq!(app.pane, Pane::Results);
+
+        drive_demo_query_to_completion(&mut app);
+
+        assert!(!app.query_running);
+        assert!(app.has_results);
+        assert!(!app.results.is_empty());
+        assert_eq!(app.selection.column.as_deref(), Some("value"));
+    }
+
+    #[test]
+    fn destructive_submit_requires_confirmation_then_executes() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+        app.query_editor_text = "DELETE FROM `app`.`users` WHERE id = 1".to_string();
+
+        app.submit();
+        assert!(app.pending_confirmation.is_some());
+        assert_eq!(app.pane, Pane::QueryEditor);
+        assert!(app.status_line.contains("Safe mode confirmation required"));
+
+        app.submit();
+        assert!(app.query_running);
+        assert_eq!(app.pane, Pane::Results);
+
+        drive_demo_query_to_completion(&mut app);
+        assert!(app.has_results);
+    }
+
+    #[test]
+    fn connect_from_wizard_rejects_invalid_port() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.port = "not-a-port".to_string();
+        app.connect_from_wizard();
+
+        assert_eq!(app.status_line, "Invalid port in connection wizard");
+    }
+
+    #[test]
+    fn export_results_handles_empty_and_non_empty_buffers() {
+        let mut app = app_in_pane(Pane::Results);
+        app.export_results(myr_core::actions_engine::ExportFormat::Csv);
+        assert_eq!(app.status_line, "No results available to export");
+
+        app.populate_demo_results();
+        app.export_results(myr_core::actions_engine::ExportFormat::Csv);
+        assert!(app.status_line.starts_with("Exported "));
+
+        app.export_results(myr_core::actions_engine::ExportFormat::Json);
+        assert!(app.status_line.starts_with("Exported "));
+    }
+
+    #[test]
+    fn pagination_keyset_transitions_forward_and_backward() {
+        let mut app = app_in_pane(Pane::SchemaExplorer);
+        app.selection.database = Some("app".to_string());
+        app.selection.table = Some("events".to_string());
+        app.schema_columns = vec!["id".to_string(), "value".to_string()];
+
+        app.start_preview_paged_query("SELECT * FROM `app`.`events` LIMIT 200".to_string());
+        drive_demo_query_to_completion(&mut app);
+
+        let state = app.pagination_state.as_ref().expect("pagination state");
+        assert_eq!(state.page_index, 0);
+        assert!(matches!(state.plan, PaginationPlan::Keyset { .. }));
+
+        app.invoke_action(ActionId::NextPage);
+        drive_demo_query_to_completion(&mut app);
+        assert_eq!(
+            app.pagination_state
+                .as_ref()
+                .expect("pagination state")
+                .page_index,
+            1
+        );
+
+        app.invoke_action(ActionId::PreviousPage);
+        drive_demo_query_to_completion(&mut app);
+        assert_eq!(
+            app.pagination_state
+                .as_ref()
+                .expect("pagination state")
+                .page_index,
+            0
+        );
+    }
+
+    #[test]
+    fn pagination_falls_back_to_offset_without_key_column() {
+        let mut app = app_in_pane(Pane::SchemaExplorer);
+        app.selection.database = Some("app".to_string());
+        app.selection.table = Some("events".to_string());
+        app.schema_columns = vec!["name".to_string(), "created_at".to_string()];
+
+        app.start_preview_paged_query("SELECT * FROM `app`.`events` LIMIT 200".to_string());
+        drive_demo_query_to_completion(&mut app);
+
+        let state = app.pagination_state.as_ref().expect("pagination state");
+        assert!(matches!(state.plan, PaginationPlan::Offset));
+    }
+
+    #[test]
+    fn apply_invocation_handles_non_sql_actions() {
+        let mut app = app_in_pane(Pane::Results);
+        app.apply_invocation(
+            ActionId::ApplyLimit200,
+            ActionInvocation::ReplaceQueryEditorText("SELECT 1".to_string()),
+        );
+        assert_eq!(app.query_editor_text, "SELECT 1");
+
+        app.apply_invocation(
+            ActionId::FocusQueryEditor,
+            ActionInvocation::OpenView(AppView::SchemaExplorer),
+        );
+        assert_eq!(app.pane, Pane::SchemaExplorer);
+
+        app.apply_invocation(
+            ActionId::CopyCell,
+            ActionInvocation::CopyToClipboard(CopyTarget::Cell),
+        );
+        assert!(app.status_line.contains("Copy requested"));
+
+        app.apply_invocation(
+            ActionId::SearchResults,
+            ActionInvocation::SearchBufferedResults,
+        );
+        assert_eq!(app.status_line, "Search requested (placeholder)");
+    }
+
+    #[test]
+    fn palette_input_and_selection_paths_update_state() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+        app.handle(Msg::TogglePalette);
+        assert!(app.show_palette);
+
+        app.handle(Msg::InputChar('p'));
+        assert_eq!(app.palette_query, "p");
+
+        app.handle(Msg::Navigate(DirectionKey::Down));
+        assert!(app.palette_selection <= app.palette_entries().len().saturating_sub(1));
+
+        app.handle(Msg::Backspace);
+        assert!(app.palette_query.is_empty());
+    }
+
+    #[test]
+    fn rendering_covers_all_panes_and_popups() {
+        let mut wizard = app_in_pane(Pane::ConnectionWizard);
+        wizard.show_help = true;
+        render_once(&wizard);
+
+        let mut schema = app_in_pane(Pane::SchemaExplorer);
+        schema.show_palette = true;
+        schema.palette_query = "prev".to_string();
+        render_once(&schema);
+
+        let mut results = app_in_pane(Pane::Results);
+        results.populate_demo_results();
+        results.pagination_state = Some(super::PaginationState {
+            database: Some("app".to_string()),
+            table: "users".to_string(),
+            page_size: 200,
+            page_index: 1,
+            last_page_row_count: 200,
+            plan: PaginationPlan::Offset,
+        });
+        render_once(&results);
+
+        let editor = app_in_pane(Pane::QueryEditor);
+        render_once(&editor);
+    }
+
+    #[test]
+    fn helper_geometry_and_identifier_quote_are_stable() {
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let centered = centered_rect(70, 60, area);
+        assert_eq!(centered.width, 70);
+        assert_eq!(centered.height, 24);
+
+        assert_eq!(quote_identifier("users"), "`users`");
+        assert_eq!(quote_identifier("odd`name"), "`odd``name`");
+    }
+
+    #[test]
+    fn handle_toggles_and_quit_paths_update_state() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+
+        app.handle(Msg::ToggleHelp);
+        assert!(app.show_help);
+
+        app.handle(Msg::TogglePerfOverlay);
+        assert!(app.show_perf_overlay);
+
+        app.handle(Msg::ToggleSafeMode);
+        assert!(!app.safe_mode_guard.is_enabled());
+
+        app.handle(Msg::CancelQuery);
+        assert!(app.cancel_requested);
+        assert_eq!(app.status_line, "Cancel requested");
+
+        app.handle(Msg::Quit);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn record_render_updates_fps_after_window_rollover() {
+        let mut app = app_in_pane(Pane::Results);
+        app.fps_window_started_at = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        app.record_render(std::time::Duration::from_millis(12));
+
+        assert!(app.last_render_ms > 0.0);
+        assert!(app.fps > 0.0);
+        assert_eq!(app.recent_render_count, 0);
+    }
+
+    #[test]
+    fn submit_in_non_submittable_panes_sets_status() {
+        let mut schema = app_in_pane(Pane::SchemaExplorer);
+        schema.submit();
+        assert_eq!(schema.status_line, "Nothing to submit in this view");
+
+        let mut results = app_in_pane(Pane::Results);
+        results.submit();
+        assert_eq!(results.status_line, "Nothing to submit in this view");
+    }
+
+    #[test]
+    fn navigate_results_reports_empty_and_updates_cursor() {
+        let mut app = app_in_pane(Pane::Results);
+        app.navigate_results(DirectionKey::Down);
+        assert_eq!(app.status_line, "No buffered rows yet");
+
+        app.populate_demo_results();
+        app.navigate_results(DirectionKey::Down);
+        assert!(app.status_line.starts_with("Results cursor:"));
+    }
+
+    #[test]
+    fn connect_from_wizard_handles_connect_failure_path() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.host = "127.0.0.1".to_string();
+        app.wizard_form.port = "1".to_string();
+        app.wizard_form.user = "root".to_string();
+
+        app.connect_from_wizard();
+        assert!(app.status_line.starts_with("Connect failed:"));
     }
 }

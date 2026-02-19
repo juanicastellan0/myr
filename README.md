@@ -62,7 +62,6 @@ and benchmark/coverage gates. The detailed product backlog is in
   - `cargo llvm-cov --workspace --all-features --html --output-dir target/coverage/html`
 - CI coverage gate:
   - minimum lines: `75%`
-  - current gate excludes `crates/tui/src/lib.rs` until TUI module split/testing is improved
   - see `.github/workflows/ci.yml`
 - Additional quality docs:
   - `docs/quality.md`

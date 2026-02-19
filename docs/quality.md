@@ -37,13 +37,7 @@ Current gate settings:
 
 ```bash
 cargo llvm-cov --workspace --all-features \
-  --ignore-filename-regex "crates/tui/src/lib.rs" \
   --json --summary-only \
   --output-path target/coverage/summary.json \
   --fail-under-lines 75
 ```
-
-Notes:
-- `crates/tui/src/lib.rs` is temporarily excluded from the threshold because the file is
-  currently monolithic and under-tested relative to the rest of the workspace.
-- `coverage-gate` still executes full tests, but threshold evaluation ignores that path.

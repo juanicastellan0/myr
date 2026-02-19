@@ -42,7 +42,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       COVERAGE_MIN_LINES: "75"
-      COVERAGE_IGNORE_REGEX: "crates/tui/src/lib.rs"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,13 +60,12 @@ jobs:
       - name: Run coverage with threshold
         run: |
           cargo llvm-cov --workspace --all-features \
-            --ignore-filename-regex "$COVERAGE_IGNORE_REGEX" \
             --json --summary-only \
             --output-path target/coverage/summary.json \
             --fail-under-lines "$COVERAGE_MIN_LINES"
 
       - name: Print coverage summary
-        run: cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+        run: cargo llvm-cov report --summary-only
 
   perf-smoke:
     name: Perf smoke (MySQL benchmark)

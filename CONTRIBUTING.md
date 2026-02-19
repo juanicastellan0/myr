@@ -21,8 +21,7 @@ Thanks for contributing.
 ## CI quality gates
 
 - CI enforces formatting, clippy, tests, build, perf smoke checks, and coverage.
-- Coverage gate currently requires at least `75%` line coverage and excludes
-  `crates/tui/src/lib.rs` from threshold evaluation.
+- Coverage gate currently requires at least `75%` line coverage.
 - See `.github/workflows/ci.yml` and `docs/quality.md`.
 
 ## Commit style
