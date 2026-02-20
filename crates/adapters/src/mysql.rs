@@ -1,13 +1,17 @@
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use myr_core::connection_manager::{BackendError, ConnectionBackend};
-use myr_core::profiles::{ConnectionProfile, TlsMode};
+use myr_core::profiles::{ConnectionProfile, PasswordSource, TlsMode};
 use myr_core::query_runner::{QueryBackend, QueryBackendError, QueryRow, QueryRowStream};
 use myr_core::schema_cache::{
     ColumnSchema, DatabaseSchema, SchemaBackend, SchemaBackendError, SchemaCatalog, TableSchema,
 };
 use mysql_async::prelude::{Query, Queryable};
-use mysql_async::{Conn, OptsBuilder, Pool, ResultSetStream, Row, TextProtocol, Value};
+use mysql_async::{
+    ClientIdentity, Conn, OptsBuilder, Pool, ResultSetStream, Row, SslOpts, TextProtocol, Value,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct MysqlConnectionBackend;
@@ -177,10 +181,7 @@ fn opts_from_profile(profile: &ConnectionProfile) -> OptsBuilder {
         .tcp_port(profile.port)
         .user(Some(profile.user.clone()));
 
-    if let Some(password) = std::env::var("MYR_DB_PASSWORD")
-        .ok()
-        .filter(|pw| !pw.is_empty())
-    {
+    if let Some(password) = resolve_password(profile) {
         builder = builder.pass(Some(password));
     }
 
@@ -188,14 +189,127 @@ fn opts_from_profile(profile: &ConnectionProfile) -> OptsBuilder {
         builder = builder.db_name(Some(database.clone()));
     }
 
-    // TLS support in mysql_async defaults to negotiated secure transport when configured.
-    // We keep this conservative mapping for now and can expand with cert path support later.
-    match profile.tls_mode {
-        TlsMode::Disabled => builder = builder.prefer_socket(false),
-        TlsMode::Prefer | TlsMode::Require | TlsMode::VerifyIdentity => {}
+    if let Some(ssl_opts) = ssl_opts_from_profile(profile) {
+        builder = builder.ssl_opts(ssl_opts);
+    }
+
+    if matches!(profile.tls_mode, TlsMode::Disabled) {
+        builder = builder.prefer_socket(false);
     }
 
     builder
+}
+
+fn resolve_password(profile: &ConnectionProfile) -> Option<String> {
+    let env_password = std::env::var("MYR_DB_PASSWORD")
+        .ok()
+        .filter(|pw| !pw.is_empty());
+
+    match profile.password_source {
+        PasswordSource::EnvVar => env_password,
+        PasswordSource::Keyring => {
+            if let Some(password) = load_keyring_password(profile) {
+                return Some(password);
+            }
+
+            if let Some(password) = env_password {
+                store_keyring_password(profile, &password);
+                return Some(password);
+            }
+
+            None
+        }
+    }
+}
+
+fn ssl_opts_from_profile(profile: &ConnectionProfile) -> Option<SslOpts> {
+    if !profile_requests_tls(profile) {
+        return None;
+    }
+
+    let mut ssl_opts = SslOpts::default()
+        .with_disable_built_in_roots(profile.tls_disable_built_in_roots)
+        .with_danger_skip_domain_validation(profile.tls_skip_domain_validation)
+        .with_danger_accept_invalid_certs(profile.tls_accept_invalid_certs);
+
+    if let Some(ca_cert_path) = non_empty(profile.tls_ca_cert_path.as_deref()) {
+        ssl_opts = ssl_opts.with_root_certs(vec![PathBuf::from(ca_cert_path).into()]);
+    }
+
+    if let Some(hostname_override) = non_empty(profile.tls_hostname_override.as_deref()) {
+        ssl_opts = ssl_opts.with_danger_tls_hostname_override(Some(hostname_override.to_string()));
+    }
+
+    if let Some(identity) = client_identity_from_profile(profile) {
+        ssl_opts = ssl_opts.with_client_identity(Some(identity));
+    }
+
+    Some(ssl_opts)
+}
+
+fn profile_requests_tls(profile: &ConnectionProfile) -> bool {
+    match profile.tls_mode {
+        TlsMode::Disabled => false,
+        TlsMode::Prefer => has_custom_tls_settings(profile),
+        TlsMode::Require | TlsMode::VerifyIdentity => true,
+    }
+}
+
+fn has_custom_tls_settings(profile: &ConnectionProfile) -> bool {
+    non_empty(profile.tls_ca_cert_path.as_deref()).is_some()
+        || non_empty(profile.tls_client_cert_path.as_deref()).is_some()
+        || non_empty(profile.tls_client_key_path.as_deref()).is_some()
+        || non_empty(profile.tls_hostname_override.as_deref()).is_some()
+        || profile.tls_disable_built_in_roots
+        || profile.tls_skip_domain_validation
+        || profile.tls_accept_invalid_certs
+}
+
+fn client_identity_from_profile(profile: &ConnectionProfile) -> Option<ClientIdentity> {
+    let cert_path = non_empty(profile.tls_client_cert_path.as_deref())?;
+    let key_path = non_empty(profile.tls_client_key_path.as_deref())?;
+    Some(ClientIdentity::new(
+        PathBuf::from(cert_path).into(),
+        PathBuf::from(key_path).into(),
+    ))
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn load_keyring_password(profile: &ConnectionProfile) -> Option<String> {
+    let entry = keyring_entry(profile)?;
+    entry.get_password().ok().filter(|pw| !pw.is_empty())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn load_keyring_password(_profile: &ConnectionProfile) -> Option<String> {
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn store_keyring_password(profile: &ConnectionProfile, password: &str) {
+    if password.is_empty() {
+        return;
+    }
+    if let Some(entry) = keyring_entry(profile) {
+        let _ = entry.set_password(password);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn store_keyring_password(_profile: &ConnectionProfile, _password: &str) {}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn keyring_entry(profile: &ConnectionProfile) -> Option<keyring::Entry> {
+    let service = non_empty(profile.keyring_service.as_deref()).unwrap_or("myr");
+    let account = non_empty(profile.keyring_account.as_deref()).unwrap_or(profile.name.as_str());
+    keyring::Entry::new(service, account).ok()
 }
 
 fn row_to_query_row(row: Row) -> QueryRow {
@@ -243,10 +357,13 @@ fn to_query_error(error: mysql_async::Error) -> QueryBackendError {
 
 #[cfg(test)]
 mod tests {
-    use myr_core::profiles::ConnectionProfile;
+    use myr_core::profiles::{ConnectionProfile, TlsMode};
     use mysql_async::Value;
 
-    use super::{mysql_value_to_string, opts_from_profile};
+    use super::{
+        client_identity_from_profile, mysql_value_to_string, opts_from_profile,
+        profile_requests_tls,
+    };
 
     #[test]
     fn value_conversion_is_human_readable() {
@@ -267,5 +384,33 @@ mod tests {
 
         let _opts = opts_from_profile(&profile);
         // Construction is the assertion here; mysql_async exposes limited stable introspection.
+    }
+
+    #[test]
+    fn tls_mode_prefer_requires_explicit_tls_settings() {
+        let mut profile = ConnectionProfile::new("local", "127.0.0.1", "root");
+        profile.tls_mode = TlsMode::Prefer;
+        assert!(!profile_requests_tls(&profile));
+
+        profile.tls_ca_cert_path = Some("/tmp/ca.pem".to_string());
+        assert!(profile_requests_tls(&profile));
+    }
+
+    #[test]
+    fn tls_mode_require_always_uses_tls() {
+        let mut profile = ConnectionProfile::new("local", "127.0.0.1", "root");
+        profile.tls_mode = TlsMode::Require;
+        assert!(profile_requests_tls(&profile));
+    }
+
+    #[test]
+    fn client_identity_requires_both_cert_and_key_paths() {
+        let mut profile = ConnectionProfile::new("local", "127.0.0.1", "root");
+        profile.tls_mode = TlsMode::VerifyIdentity;
+        profile.tls_client_cert_path = Some("/tmp/client-cert.pem".to_string());
+        assert!(client_identity_from_profile(&profile).is_none());
+
+        profile.tls_client_key_path = Some("/tmp/client-key.pem".to_string());
+        assert!(client_identity_from_profile(&profile).is_some());
     }
 }

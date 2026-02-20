@@ -49,10 +49,10 @@
 
 ## M7: Security and safety hardening
 
-- [ ] Optional secure password storage (OS keyring) in addition to env vars
-- [ ] Expanded TLS support (CA/cert/key + identity verification options)
+- [x] Optional secure password storage (OS keyring) in addition to env vars
+- [x] Expanded TLS support (CA/cert/key + identity verification options)
 - [x] Explicit read-only profile mode guard
-- [ ] SQL audit trail with profile + timestamp metadata
+- [x] SQL audit trail with profile + timestamp metadata
 
 ## M8: Power-user workflows and scale
 

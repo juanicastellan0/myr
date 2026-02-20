@@ -1,4 +1,5 @@
 pub mod actions_engine;
+pub mod audit_trail;
 pub mod connection_manager;
 pub mod profiles;
 pub mod query_runner;

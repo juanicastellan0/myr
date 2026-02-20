@@ -15,6 +15,14 @@ pub enum TlsMode {
     VerifyIdentity,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PasswordSource {
+    #[default]
+    EnvVar,
+    Keyring,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectionProfile {
     pub name: String,
@@ -24,6 +32,26 @@ pub struct ConnectionProfile {
     pub database: Option<String>,
     #[serde(default)]
     pub tls_mode: TlsMode,
+    #[serde(default)]
+    pub password_source: PasswordSource,
+    #[serde(default)]
+    pub keyring_service: Option<String>,
+    #[serde(default)]
+    pub keyring_account: Option<String>,
+    #[serde(default)]
+    pub tls_ca_cert_path: Option<String>,
+    #[serde(default)]
+    pub tls_client_cert_path: Option<String>,
+    #[serde(default)]
+    pub tls_client_key_path: Option<String>,
+    #[serde(default)]
+    pub tls_disable_built_in_roots: bool,
+    #[serde(default)]
+    pub tls_skip_domain_validation: bool,
+    #[serde(default)]
+    pub tls_accept_invalid_certs: bool,
+    #[serde(default)]
+    pub tls_hostname_override: Option<String>,
     #[serde(default)]
     pub read_only: bool,
 }
@@ -38,6 +66,16 @@ impl ConnectionProfile {
             user: user.into(),
             database: None,
             tls_mode: TlsMode::Prefer,
+            password_source: PasswordSource::EnvVar,
+            keyring_service: None,
+            keyring_account: None,
+            tls_ca_cert_path: None,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
+            tls_disable_built_in_roots: false,
+            tls_skip_domain_validation: false,
+            tls_accept_invalid_certs: false,
+            tls_hostname_override: None,
             read_only: false,
         }
     }

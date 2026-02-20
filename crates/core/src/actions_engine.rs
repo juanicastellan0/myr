@@ -854,10 +854,7 @@ mod tests {
             suggest_explain_query("SELECT * FROM users"),
             Some("EXPLAIN SELECT * FROM users".to_string())
         );
-        assert_eq!(
-            suggest_explain_query("EXPLAIN SELECT * FROM users"),
-            None
-        );
+        assert_eq!(suggest_explain_query("EXPLAIN SELECT * FROM users"), None);
         assert_eq!(suggest_explain_query(""), None);
     }
 

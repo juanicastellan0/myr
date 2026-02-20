@@ -17,8 +17,9 @@ use myr_adapters::mysql::{MysqlConnectionBackend, MysqlDataBackend};
 use myr_core::actions_engine::{
     ActionContext, ActionId, ActionInvocation, ActionsEngine, AppView, SchemaSelection,
 };
+use myr_core::audit_trail::{unix_timestamp_millis, AuditOutcome, AuditRecord, FileAuditTrail};
 use myr_core::connection_manager::ConnectionManager;
-use myr_core::profiles::{ConnectionProfile, FileProfilesStore};
+use myr_core::profiles::{ConnectionProfile, FileProfilesStore, PasswordSource, TlsMode};
 use myr_core::query_runner::{CancellationToken, QueryRow, QueryRunner};
 use myr_core::results_buffer::ResultsRingBuffer;
 use myr_core::safe_mode::{assess_sql_safety, ConfirmationToken, GuardDecision, SafeModeGuard};
@@ -44,6 +45,8 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 const QUERY_RETRY_LIMIT: u8 = 1;
 const AUTO_RECONNECT_LIMIT: u8 = 2;
 const PANE_FLASH_DURATION_TICKS: u8 = 8;
+const AUDIT_SQL_MAX_CHARS: usize = 1_000;
+const AUDIT_ERROR_MAX_CHARS: usize = 400;
 
 const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
 const DEMO_SCHEMA_COLUMNS: [&str; 4] = ["id", "email", "created_at", "updated_at"];
@@ -112,7 +115,9 @@ enum WizardField {
     Host,
     Port,
     User,
+    PasswordSource,
     Database,
+    TlsMode,
     ReadOnly,
 }
 
@@ -122,8 +127,10 @@ impl WizardField {
             Self::ProfileName => Self::Host,
             Self::Host => Self::Port,
             Self::Port => Self::User,
-            Self::User => Self::Database,
-            Self::Database => Self::ReadOnly,
+            Self::User => Self::PasswordSource,
+            Self::PasswordSource => Self::Database,
+            Self::Database => Self::TlsMode,
+            Self::TlsMode => Self::ReadOnly,
             Self::ReadOnly => Self::ProfileName,
         }
     }
@@ -134,7 +141,9 @@ impl WizardField {
             Self::Host => "Host",
             Self::Port => "Port",
             Self::User => "User",
+            Self::PasswordSource => "Password source",
             Self::Database => "Database",
+            Self::TlsMode => "TLS mode",
             Self::ReadOnly => "Read-only",
         }
     }
@@ -146,7 +155,9 @@ struct ConnectionWizardForm {
     host: String,
     port: String,
     user: String,
+    password_source: String,
     database: String,
+    tls_mode: String,
     read_only: String,
     active_field: WizardField,
     editing: bool,
@@ -160,7 +171,9 @@ impl Default for ConnectionWizardForm {
             host: "127.0.0.1".to_string(),
             port: "3306".to_string(),
             user: "root".to_string(),
+            password_source: "env".to_string(),
             database: "app".to_string(),
+            tls_mode: "prefer".to_string(),
             read_only: "no".to_string(),
             active_field: WizardField::ProfileName,
             editing: false,
@@ -324,6 +337,7 @@ struct TuiApp {
     pane_flash_ticks: u8,
     exit_confirmation: bool,
     status_line: String,
+    audit_trail: Option<FileAuditTrail>,
     query_editor_text: String,
     query_cursor: usize,
     query_history: Vec<String>,
@@ -401,6 +415,7 @@ impl Default for TuiApp {
             pane_flash_ticks: 0,
             exit_confirmation: false,
             status_line: "Select a field with Up/Down, press E to edit, F5 to connect".to_string(),
+            audit_trail: default_audit_trail(),
             query_editor_text: "SELECT * FROM `users`".to_string(),
             query_cursor: "SELECT * FROM `users`".len(),
             query_history: Vec::new(),
@@ -418,7 +433,10 @@ impl Default for TuiApp {
 impl TuiApp {
     fn handle(&mut self, msg: Msg) {
         if self.exit_confirmation
-            && !matches!(msg, Msg::Quit | Msg::TogglePalette | Msg::Tick | Msg::CancelQuery)
+            && !matches!(
+                msg,
+                Msg::Quit | Msg::TogglePalette | Msg::Tick | Msg::CancelQuery
+            )
         {
             self.status_line =
                 "Exit pending. Press Ctrl+C to confirm, F10 to exit now, Esc to cancel."
@@ -546,8 +564,16 @@ impl TuiApp {
                     cancellation.cancel();
                     self.status_line = "Cancelling query...".to_string();
                 } else {
+                    let audit_sql = self.inflight_query_sql.clone().unwrap_or_default();
                     self.query_running = false;
                     self.query_ticks_remaining = 0;
+                    self.append_audit_event(
+                        AuditOutcome::Cancelled,
+                        &audit_sql,
+                        None,
+                        None,
+                        Some("cancel requested"),
+                    );
                     self.status_line = "Cancel requested".to_string();
                 }
             }
@@ -598,12 +624,20 @@ impl TuiApp {
 
         if self.query_running && self.data_backend.is_none() {
             if self.query_ticks_remaining == 0 {
+                let audit_sql = self.inflight_query_sql.clone().unwrap_or_default();
                 self.query_running = false;
                 self.populate_demo_results();
                 self.query_retry_attempts = 0;
                 self.inflight_query_sql = None;
                 self.last_failed_query = None;
                 self.finalize_pagination_after_query();
+                self.append_audit_event(
+                    AuditOutcome::Succeeded,
+                    &audit_sql,
+                    Some(self.results.len() as u64),
+                    None,
+                    None,
+                );
                 self.status_line = "Query completed".to_string();
             } else {
                 self.query_ticks_remaining = self.query_ticks_remaining.saturating_sub(1);
@@ -742,6 +776,14 @@ impl TuiApp {
             .port
             .parse::<u16>()
             .map_err(|_| "Invalid port in connection wizard".to_string())?;
+        let password_source =
+            parse_password_source(&self.wizard_form.password_source).ok_or_else(|| {
+                "Invalid password source in connection wizard (use env/keyring)".to_string()
+            })?;
+        let tls_mode = parse_tls_mode(&self.wizard_form.tls_mode).ok_or_else(|| {
+            "Invalid TLS mode in connection wizard (use disabled/prefer/require/verify_identity)"
+                .to_string()
+        })?;
         let read_only = parse_read_only_flag(&self.wizard_form.read_only).ok_or_else(|| {
             "Invalid read-only mode in connection wizard (use yes/no)".to_string()
         })?;
@@ -757,6 +799,8 @@ impl TuiApp {
         } else {
             Some(self.wizard_form.database.clone())
         };
+        profile.password_source = password_source;
+        profile.tls_mode = tls_mode;
         profile.read_only = read_only;
         Ok(profile)
     }
@@ -766,9 +810,9 @@ impl TuiApp {
             Some(receiver) => match receiver.try_recv() {
                 Ok(outcome) => Some(outcome),
                 Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => {
-                    Some(ConnectWorkerOutcome::Failure("connect worker disconnected".to_string()))
-                }
+                Err(TryRecvError::Disconnected) => Some(ConnectWorkerOutcome::Failure(
+                    "connect worker disconnected".to_string(),
+                )),
             },
             None => None,
         };
@@ -850,6 +894,16 @@ impl TuiApp {
 
         self.active_connection_profile = Some(profile.clone());
         self.last_connect_profile = Some(profile.clone());
+        self.wizard_form.password_source = match profile.password_source {
+            PasswordSource::EnvVar => "env".to_string(),
+            PasswordSource::Keyring => "keyring".to_string(),
+        };
+        self.wizard_form.tls_mode = match profile.tls_mode {
+            TlsMode::Disabled => "disabled".to_string(),
+            TlsMode::Prefer => "prefer".to_string(),
+            TlsMode::Require => "require".to_string(),
+            TlsMode::VerifyIdentity => "verify_identity".to_string(),
+        };
         self.wizard_form.read_only = if profile.read_only {
             "yes".to_string()
         } else {
@@ -914,9 +968,9 @@ impl TuiApp {
             Some(receiver) => match receiver.try_recv() {
                 Ok(outcome) => Some(outcome),
                 Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => {
-                    Some(QueryWorkerOutcome::Failure("query worker disconnected".to_string()))
-                }
+                Err(TryRecvError::Disconnected) => Some(QueryWorkerOutcome::Failure(
+                    "query worker disconnected".to_string(),
+                )),
             },
             None => None,
         };
@@ -928,6 +982,13 @@ impl TuiApp {
         self.query_result_rx = None;
         self.query_cancellation = None;
         self.query_running = false;
+        let audit_sql = self
+            .inflight_query_sql
+            .clone()
+            .or_else(|| {
+                (!self.query_editor_text.trim().is_empty()).then(|| self.query_editor_text.clone())
+            })
+            .unwrap_or_default();
 
         match outcome {
             QueryWorkerOutcome::Success {
@@ -946,6 +1007,18 @@ impl TuiApp {
                 self.inflight_query_sql = None;
                 self.last_failed_query = None;
                 self.finalize_pagination_after_query();
+                let audit_outcome = if was_cancelled {
+                    AuditOutcome::Cancelled
+                } else {
+                    AuditOutcome::Succeeded
+                };
+                self.append_audit_event(
+                    audit_outcome,
+                    &audit_sql,
+                    Some(rows_streamed),
+                    Some(elapsed),
+                    None,
+                );
                 self.status_line = if was_cancelled {
                     format!("Query cancelled after {rows_streamed} rows in {elapsed:.1?}")
                 } else {
@@ -957,12 +1030,14 @@ impl TuiApp {
                 self.has_results = !self.results.is_empty();
                 self.results_search_mode = false;
                 self.results_search_query.clear();
-                let query_sql = self
-                    .inflight_query_sql
-                    .clone()
-                    .or_else(|| (!self.query_editor_text.trim().is_empty()).then(|| self.query_editor_text.clone()));
+                let query_sql = if audit_sql.is_empty() {
+                    None
+                } else {
+                    Some(audit_sql.clone())
+                };
                 let transient = is_transient_query_error(&error);
                 let connection_loss = is_connection_lost_error(&error);
+                self.append_audit_event(AuditOutcome::Failed, &audit_sql, None, None, Some(&error));
 
                 if transient
                     && !self.cancel_requested
@@ -972,8 +1047,7 @@ impl TuiApp {
                         self.query_retry_attempts = self.query_retry_attempts.saturating_add(1);
                         self.status_line = format!(
                             "Transient query failure; retrying ({}/{})...",
-                            self.query_retry_attempts,
-                            QUERY_RETRY_LIMIT
+                            self.query_retry_attempts, QUERY_RETRY_LIMIT
                         );
                         self.start_query_internal(sql, true);
                         self.cancel_requested = false;
@@ -995,8 +1069,7 @@ impl TuiApp {
                         self.start_connect_with_profile(profile, ConnectIntent::AutoReconnect);
                         self.status_line = format!(
                             "Connection dropped; reconnecting ({}/{})...",
-                            self.reconnect_attempts,
-                            AUTO_RECONNECT_LIMIT
+                            self.reconnect_attempts, AUTO_RECONNECT_LIMIT
                         );
                         self.cancel_requested = false;
                         return;
@@ -1086,8 +1159,10 @@ impl TuiApp {
             WizardField::Host => WizardField::ProfileName,
             WizardField::Port => WizardField::Host,
             WizardField::User => WizardField::Port,
-            WizardField::Database => WizardField::User,
-            WizardField::ReadOnly => WizardField::Database,
+            WizardField::PasswordSource => WizardField::User,
+            WizardField::Database => WizardField::PasswordSource,
+            WizardField::TlsMode => WizardField::Database,
+            WizardField::ReadOnly => WizardField::TlsMode,
         }
     }
 
@@ -1578,11 +1653,7 @@ impl TuiApp {
         self.query_history_index = Some(next_index);
         self.query_editor_text = self.query_history[next_index].clone();
         self.query_cursor = self.query_editor_text.len();
-        self.status_line = format!(
-            "History {} / {}",
-            next_index + 1,
-            self.query_history.len()
-        );
+        self.status_line = format!("History {} / {}", next_index + 1, self.query_history.len());
     }
 
     fn use_next_query_from_history(&mut self) {
@@ -1596,11 +1667,7 @@ impl TuiApp {
             self.query_history_index = Some(next_index);
             self.query_editor_text = self.query_history[next_index].clone();
             self.query_cursor = self.query_editor_text.len();
-            self.status_line = format!(
-                "History {} / {}",
-                next_index + 1,
-                self.query_history.len()
-            );
+            self.status_line = format!("History {} / {}", next_index + 1, self.query_history.len());
             return;
         }
 
@@ -1637,8 +1704,7 @@ impl TuiApp {
         if self.query_cursor > self.query_editor_text.len() {
             self.query_cursor = self.query_editor_text.len();
         }
-        while self.query_cursor > 0 && !self.query_editor_text.is_char_boundary(self.query_cursor)
-        {
+        while self.query_cursor > 0 && !self.query_editor_text.is_char_boundary(self.query_cursor) {
             self.query_cursor = self.query_cursor.saturating_sub(1);
         }
     }
@@ -1694,7 +1760,9 @@ impl TuiApp {
             WizardField::Host => self.wizard_form.host.as_str(),
             WizardField::Port => self.wizard_form.port.as_str(),
             WizardField::User => self.wizard_form.user.as_str(),
+            WizardField::PasswordSource => self.wizard_form.password_source.as_str(),
             WizardField::Database => self.wizard_form.database.as_str(),
+            WizardField::TlsMode => self.wizard_form.tls_mode.as_str(),
             WizardField::ReadOnly => self.wizard_form.read_only.as_str(),
         }
     }
@@ -1705,7 +1773,9 @@ impl TuiApp {
             WizardField::Host => &mut self.wizard_form.host,
             WizardField::Port => &mut self.wizard_form.port,
             WizardField::User => &mut self.wizard_form.user,
+            WizardField::PasswordSource => &mut self.wizard_form.password_source,
             WizardField::Database => &mut self.wizard_form.database,
+            WizardField::TlsMode => &mut self.wizard_form.tls_mode,
             WizardField::ReadOnly => &mut self.wizard_form.read_only,
         }
     }
@@ -1749,6 +1819,39 @@ impl TuiApp {
         }
     }
 
+    fn append_audit_event(
+        &self,
+        outcome: AuditOutcome,
+        sql: &str,
+        rows_streamed: Option<u64>,
+        elapsed: Option<Duration>,
+        error: Option<&str>,
+    ) {
+        let Some(audit_trail) = self.audit_trail.as_ref() else {
+            return;
+        };
+
+        let record = AuditRecord {
+            timestamp_unix_ms: unix_timestamp_millis(),
+            profile_name: self
+                .active_connection_profile
+                .as_ref()
+                .map(|profile| profile.name.clone())
+                .or_else(|| self.connected_profile.clone()),
+            database: self.selection.database.clone().or_else(|| {
+                self.active_connection_profile
+                    .as_ref()
+                    .and_then(|profile| profile.database.clone())
+            }),
+            outcome,
+            sql: compact_sql_for_audit(sql),
+            rows_streamed,
+            elapsed_ms: elapsed.map(|duration| duration.as_millis()),
+            error: error.map(|value| truncate_for_audit(value, AUDIT_ERROR_MAX_CHARS)),
+        };
+        let _ = audit_trail.append(&record);
+    }
+
     fn start_query(&mut self, sql: String) {
         self.start_query_internal(sql, false);
     }
@@ -1766,6 +1869,13 @@ impl TuiApp {
         self.inflight_query_sql = Some(sql.clone());
         self.query_editor_text = sql;
         self.query_cursor = self.query_editor_text.len();
+        self.append_audit_event(
+            AuditOutcome::Started,
+            &self.query_editor_text,
+            None,
+            None,
+            None,
+        );
         self.set_active_pane(Pane::Results);
         self.results_search_mode = false;
         self.results_search_query.clear();
@@ -1811,8 +1921,16 @@ impl TuiApp {
             let assessment = assess_sql_safety(&sql);
             if !assessment.is_safe_read_only() {
                 self.pending_confirmation = None;
-                self.status_line = "Blocked by read-only profile mode: write/DDL SQL is disabled"
-                    .to_string();
+                let blocked_message =
+                    "Blocked by read-only profile mode: write/DDL SQL is disabled".to_string();
+                self.append_audit_event(
+                    AuditOutcome::Blocked,
+                    &sql,
+                    None,
+                    None,
+                    Some(&blocked_message),
+                );
+                self.status_line = blocked_message;
                 return;
             }
         }
@@ -2059,9 +2177,17 @@ impl TuiApp {
                 self.status_line = "Inserted query snippet".to_string();
             }
             ActionInvocation::CancelQuery => {
+                let audit_sql = self.inflight_query_sql.clone().unwrap_or_default();
                 self.query_running = false;
                 self.query_ticks_remaining = 0;
                 self.cancel_requested = true;
+                self.append_audit_event(
+                    AuditOutcome::Cancelled,
+                    &audit_sql,
+                    None,
+                    None,
+                    Some("cancel action"),
+                );
                 self.status_line = "Query cancelled".to_string();
             }
             ActionInvocation::ExportResults(format) => {
@@ -2158,7 +2284,8 @@ impl TuiApp {
             .or_else(|| self.wizard_profile().ok());
 
         let Some(profile) = profile else {
-            self.status_line = "Reconnect unavailable: provide a valid connection profile".to_string();
+            self.status_line =
+                "Reconnect unavailable: provide a valid connection profile".to_string();
             return;
         };
 
@@ -2316,22 +2443,32 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     let latency_text = app
         .last_connection_latency
         .map_or("n/a".to_string(), |latency| format!("{latency:.1?}"));
-    let profile_mode = app.active_connection_profile.as_ref().map_or("-", |profile| {
-        if profile.read_only { "RO" } else { "RW" }
-    });
+    let profile_mode = app
+        .active_connection_profile
+        .as_ref()
+        .map_or("-", |profile| if profile.read_only { "RO" } else { "RW" });
+    let tls_mode = app
+        .active_connection_profile
+        .as_ref()
+        .map_or("-", |profile| match profile.tls_mode {
+            TlsMode::Disabled => "off",
+            TlsMode::Prefer => "prefer",
+            TlsMode::Require => "require",
+            TlsMode::VerifyIdentity => "verify",
+        });
     let heartbeat = spinner_char(app.loading_tick);
-    let loading_text = if app.connect_requested && app.connect_intent == ConnectIntent::AutoReconnect
-    {
-        "reconnecting"
-    } else if app.connect_requested {
-        "connecting"
-    } else if app.query_running && app.cancel_requested {
-        "cancelling query"
-    } else if app.query_running {
-        "querying"
-    } else {
-        "idle"
-    };
+    let loading_text =
+        if app.connect_requested && app.connect_intent == ConnectIntent::AutoReconnect {
+            "reconnecting"
+        } else if app.connect_requested {
+            "connecting"
+        } else if app.query_running && app.cancel_requested {
+            "cancelling query"
+        } else if app.query_running {
+            "querying"
+        } else {
+            "idle"
+        };
     let runtime_state = app.runtime_state_label();
     let runtime_state_color = if runtime_state == "BUSY" {
         Color::Yellow
@@ -2384,6 +2521,8 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         Span::raw(" | "),
         Span::raw(format!("Mode: {profile_mode}")),
         Span::raw(" | "),
+        Span::raw(format!("TLS: {tls_mode}")),
+        Span::raw(" | "),
         Span::raw(format!(
             "DB: {}",
             app.selection.database.as_deref().unwrap_or("-")
@@ -2398,11 +2537,7 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         Span::raw(" | "),
         Span::raw(format!("Load: {loading_text}")),
     ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Runtime"),
-    );
+    .block(Block::default().borders(Borders::ALL).title("Runtime"));
     frame.render_widget(runtime_bar, top_chunks[0]);
 
     let tab_focus_marker = pulse_char(app.loading_tick);
@@ -2447,15 +2582,11 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     };
 
     let tabs = Tabs::new(tab_labels)
-    .select(app.pane_tab_index())
-    .style(Style::default().fg(Color::DarkGray))
-    .highlight_style(tab_highlight_style)
-    .divider(" | ")
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(tabs_title),
-    );
+        .select(app.pane_tab_index())
+        .style(Style::default().fg(Color::DarkGray))
+        .highlight_style(tab_highlight_style)
+        .divider(" | ")
+        .block(Block::default().borders(Borders::ALL).title(tabs_title));
     frame.render_widget(tabs, top_chunks[1]);
 
     let body_text = match app.pane {
@@ -2470,9 +2601,19 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 (WizardField::Port, "Port", app.wizard_form.port.as_str()),
                 (WizardField::User, "User", app.wizard_form.user.as_str()),
                 (
+                    WizardField::PasswordSource,
+                    "Password source (env/keyring)",
+                    app.wizard_form.password_source.as_str(),
+                ),
+                (
                     WizardField::Database,
                     "Database",
                     app.wizard_form.database.as_str(),
+                ),
+                (
+                    WizardField::TlsMode,
+                    "TLS mode (disabled/prefer/require/verify_identity)",
+                    app.wizard_form.tls_mode.as_str(),
                 ),
                 (
                     WizardField::ReadOnly,
@@ -2692,8 +2833,7 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     frame.render_widget(body, chunks[1]);
 
     let footer_line = if app.pane == Pane::ConnectionWizard {
-        "F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit"
-            .to_string()
+        "F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit".to_string()
     } else {
         let actions = app
             .actions
@@ -2887,12 +3027,58 @@ fn connection_badge_and_marker(connection_state: &str, tick: usize) -> (&'static
     }
 }
 
+fn parse_password_source(value: &str) -> Option<PasswordSource> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "env" | "env_var" | "envvar" | "environment" | "" => Some(PasswordSource::EnvVar),
+        "keyring" | "secure_store" | "secure-store" => Some(PasswordSource::Keyring),
+        _ => None,
+    }
+}
+
+fn parse_tls_mode(value: &str) -> Option<TlsMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "disabled" | "off" | "none" => Some(TlsMode::Disabled),
+        "prefer" | "" => Some(TlsMode::Prefer),
+        "require" | "required" => Some(TlsMode::Require),
+        "verify_identity" | "verify-identity" | "verifyidentity" | "verify" => {
+            Some(TlsMode::VerifyIdentity)
+        }
+        _ => None,
+    }
+}
+
 fn parse_read_only_flag(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "y" | "on" | "ro" | "read-only" => Some(true),
         "0" | "false" | "no" | "n" | "off" | "rw" | "read-write" | "" => Some(false),
         _ => None,
     }
+}
+
+fn compact_sql_for_audit(sql: &str) -> String {
+    let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_for_audit(&compact, AUDIT_SQL_MAX_CHARS)
+}
+
+fn truncate_for_audit(value: &str, max_chars: usize) -> String {
+    let mut truncated = String::new();
+    for ch in value.chars().take(max_chars) {
+        truncated.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        truncated.push_str("...");
+    }
+    truncated
+}
+
+#[cfg(test)]
+fn default_audit_trail() -> Option<FileAuditTrail> {
+    None
+}
+
+#[cfg(not(test))]
+fn default_audit_trail() -> Option<FileAuditTrail> {
+    FileAuditTrail::load_default().ok()
 }
 
 fn previous_char_boundary(text: &str, index: usize) -> usize {
@@ -2928,29 +3114,23 @@ fn run_connect_worker(profile: ConnectionProfile) -> ConnectWorkerOutcome {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            return ConnectWorkerOutcome::Failure(format!(
-                "failed to create runtime: {error}"
-            ));
+            return ConnectWorkerOutcome::Failure(format!("failed to create runtime: {error}"));
         }
     };
 
     runtime.block_on(async move {
         let mut manager = ConnectionManager::new(MysqlConnectionBackend);
-        let connect_latency = match tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            manager.connect(profile.clone()),
-        )
-        .await
-        {
-            Ok(Ok(latency)) => latency,
-            Ok(Err(error)) => return ConnectWorkerOutcome::Failure(error.to_string()),
-            Err(_) => {
-                return ConnectWorkerOutcome::Failure(format!(
-                    "connect timed out after {:.1?}",
-                    CONNECT_TIMEOUT
-                ));
-            }
-        };
+        let connect_latency =
+            match tokio::time::timeout(CONNECT_TIMEOUT, manager.connect(profile.clone())).await {
+                Ok(Ok(latency)) => latency,
+                Ok(Err(error)) => return ConnectWorkerOutcome::Failure(error.to_string()),
+                Err(_) => {
+                    return ConnectWorkerOutcome::Failure(format!(
+                        "connect timed out after {:.1?}",
+                        CONNECT_TIMEOUT
+                    ));
+                }
+            };
 
         let mut warnings = Vec::new();
         match tokio::time::timeout(CONNECT_TIMEOUT, manager.disconnect()).await {
@@ -2963,21 +3143,23 @@ fn run_connect_worker(profile: ConnectionProfile) -> ConnectWorkerOutcome {
         }
 
         let data_backend = MysqlDataBackend::from_profile(&profile);
-        let mut schema_cache = SchemaCacheService::new(data_backend.clone(), Duration::from_secs(10));
-        let databases = match tokio::time::timeout(CONNECT_TIMEOUT, schema_cache.list_databases()).await {
-            Ok(Ok(databases)) => databases,
-            Ok(Err(error)) => {
-                warnings.push(format!("schema fetch failed: {error}"));
-                Vec::new()
-            }
-            Err(_) => {
-                warnings.push(format!(
-                    "schema fetch timed out after {:.1?}",
-                    CONNECT_TIMEOUT
-                ));
-                Vec::new()
-            }
-        };
+        let mut schema_cache =
+            SchemaCacheService::new(data_backend.clone(), Duration::from_secs(10));
+        let databases =
+            match tokio::time::timeout(CONNECT_TIMEOUT, schema_cache.list_databases()).await {
+                Ok(Ok(databases)) => databases,
+                Ok(Err(error)) => {
+                    warnings.push(format!("schema fetch failed: {error}"));
+                    Vec::new()
+                }
+                Err(_) => {
+                    warnings.push(format!(
+                        "schema fetch timed out after {:.1?}",
+                        CONNECT_TIMEOUT
+                    ));
+                    Vec::new()
+                }
+            };
 
         if let Err(error) = data_backend.disconnect().await {
             warnings.push(format!("schema backend disconnect warning: {error}"));
@@ -3188,17 +3370,17 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use myr_core::actions_engine::CopyTarget;
-    use myr_core::profiles::ConnectionProfile;
+    use myr_core::profiles::{ConnectionProfile, PasswordSource, TlsMode};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
     use super::{
         candidate_key_column, centered_rect, connection_badge_and_marker, extract_key_bounds,
-        is_connection_lost_error, is_transient_query_error, map_key_event, quote_identifier,
-        parse_read_only_flag, render, suggest_limit_in_editor, ActionId, ActionInvocation,
-        AppView, ConnectIntent, DirectionKey, ErrorKind, Msg, MysqlDataBackend, PaginationPlan,
-        Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer, SchemaLane, TuiApp, WizardField,
-        QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
+        is_connection_lost_error, is_transient_query_error, map_key_event, parse_password_source,
+        parse_read_only_flag, parse_tls_mode, quote_identifier, render, suggest_limit_in_editor,
+        ActionId, ActionInvocation, AppView, ConnectIntent, DirectionKey, ErrorKind, Msg,
+        MysqlDataBackend, PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer,
+        SchemaLane, TuiApp, WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
     };
 
     fn app_in_pane(pane: Pane) -> TuiApp {
@@ -3242,7 +3424,9 @@ mod tests {
 
     fn mysql_tui_integration_enabled() -> bool {
         matches!(
-            std::env::var("MYR_RUN_TUI_MYSQL_INTEGRATION").ok().as_deref(),
+            std::env::var("MYR_RUN_TUI_MYSQL_INTEGRATION")
+                .ok()
+                .as_deref(),
             Some("1")
         )
     }
@@ -3437,6 +3621,34 @@ mod tests {
     }
 
     #[test]
+    fn password_source_parser_accepts_common_values() {
+        assert!(matches!(
+            parse_password_source("env"),
+            Some(PasswordSource::EnvVar)
+        ));
+        assert!(matches!(
+            parse_password_source("KEYRING"),
+            Some(PasswordSource::Keyring)
+        ));
+        assert_eq!(parse_password_source("vault"), None);
+    }
+
+    #[test]
+    fn tls_mode_parser_accepts_common_values() {
+        assert!(matches!(
+            parse_tls_mode("disabled"),
+            Some(TlsMode::Disabled)
+        ));
+        assert!(matches!(parse_tls_mode("prefer"), Some(TlsMode::Prefer)));
+        assert!(matches!(parse_tls_mode("require"), Some(TlsMode::Require)));
+        assert!(matches!(
+            parse_tls_mode("verify_identity"),
+            Some(TlsMode::VerifyIdentity)
+        ));
+        assert_eq!(parse_tls_mode("mtls"), None);
+    }
+
+    #[test]
     fn limit_suggestion_is_applied_in_editor_helper() {
         let suggested = suggest_limit_in_editor("SELECT * FROM users");
         assert_eq!(suggested, Some("SELECT * FROM users LIMIT 200".to_string()));
@@ -3605,8 +3817,10 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         app.query_result_rx = Some(rx);
-        tx.send(QueryWorkerOutcome::Failure("Pool was disconnected".to_string()))
-            .expect("send disconnect failure");
+        tx.send(QueryWorkerOutcome::Failure(
+            "Pool was disconnected".to_string(),
+        ))
+        .expect("send disconnect failure");
 
         app.poll_query_result();
 
@@ -3640,6 +3854,30 @@ mod tests {
         app.connect_from_wizard();
 
         assert_eq!(app.status_line, "Invalid port in connection wizard");
+    }
+
+    #[test]
+    fn connect_from_wizard_rejects_invalid_password_source() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.password_source = "vault".to_string();
+        app.connect_from_wizard();
+
+        assert_eq!(
+            app.status_line,
+            "Invalid password source in connection wizard (use env/keyring)"
+        );
+    }
+
+    #[test]
+    fn connect_from_wizard_rejects_invalid_tls_mode() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.tls_mode = "mtls".to_string();
+        app.connect_from_wizard();
+
+        assert_eq!(
+            app.status_line,
+            "Invalid TLS mode in connection wizard (use disabled/prefer/require/verify_identity)"
+        );
     }
 
     #[test]
@@ -3950,9 +4188,7 @@ mod tests {
         app.handle(Msg::CancelQuery);
         assert!(!app.cancel_requested);
         assert!(app.exit_confirmation);
-        assert!(app
-            .status_line
-            .starts_with("No active query. Exit myr?"));
+        assert!(app.status_line.starts_with("No active query. Exit myr?"));
 
         app.handle(Msg::TogglePalette);
         assert!(!app.exit_confirmation);

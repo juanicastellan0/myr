@@ -4,9 +4,8 @@ Terminal-first MySQL/MariaDB schema and data explorer focused on speed, guided a
 
 ## Status
 
-M0-M6 roadmap milestones are implemented for explorer/navigation, guided actions, reliability,
-and query UX. M7 is in progress with read-only profile mode guard implemented. Current and
-upcoming milestone tracking is in `docs/roadmap.md`.
+M0-M7 roadmap milestones are implemented for explorer/navigation, guided actions, reliability,
+query UX, and security hardening. Current and upcoming milestone tracking is in `docs/roadmap.md`.
 
 ## Workspace Layout
 
@@ -32,7 +31,10 @@ upcoming milestone tracking is in `docs/roadmap.md`.
 - Pane tabs with active-pane flash animation on tab/view changes
 - Context-aware next actions in footer + command palette
 - Safe mode confirmation for destructive SQL
+- Optional secure password retrieval via OS keyring (`password_source = keyring`) with env fallback
+- Expanded TLS profile options (mode + CA/client cert/client key + verification toggles)
 - Read-only profile mode guard (blocks write/DDL SQL when enabled)
+- SQL audit trail (`audit.ndjson`) with timestamp/profile/database/outcome metadata
 - Error panel with reconnect/retry guidance and auto-reconnect path for transient disconnects
 - Results search mode with buffered match navigation
 - Query editor upgrades: multiline editing, cursor movement, and query history recall
@@ -50,9 +52,13 @@ upcoming milestone tracking is in `docs/roadmap.md`.
 ## MySQL Connection Notes
 
 - Connection profiles in the TUI now attempt real MySQL connections via `mysql_async`.
-- Passwords are read from the `MYR_DB_PASSWORD` environment variable.
+- Password retrieval supports:
+  - `password_source = env_var` (default, reads `MYR_DB_PASSWORD`)
+  - `password_source = keyring` (reads keyring first, falls back to env and stores on success)
 - Schema/table loading and query execution use the live adapter when connected.
+- TLS options are profile-driven (`tls_mode`, optional CA/client cert/client key, verification toggles).
 - Table preview now supports paging actions: keyset pagination on detected `id`/`*_id` columns with OFFSET fallback.
+- Query executions append audit entries to `~/.config/myr/audit.ndjson` (or `$MYR_CONFIG_DIR/myr/audit.ndjson`).
 
 ## Benchmark Quickstart
 

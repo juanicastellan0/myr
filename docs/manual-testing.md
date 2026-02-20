@@ -29,7 +29,9 @@ Use these seeded values:
 - Host: `127.0.0.1`
 - Port: `33306`
 - User: `root`
+- Password source (env/keyring): `env`
 - Database: `myr_bench`
+- TLS mode (disabled/prefer/require/verify_identity): `prefer`
 - Read-only (yes/no): `no`
 
 Steps:
@@ -42,8 +44,43 @@ Expected:
 
 - Runtime bar transitions `DB: [~] CONNECTING` to `DB: [+] CONNECTED`.
 - Runtime bar shows `Mode: RW` for this profile.
+- Runtime bar shows `TLS: prefer` for this profile.
 - Status line reports successful connect with latency.
 - App switches to Schema Explorer automatically.
+
+## Secure Password Storage (Keyring)
+
+Steps:
+
+1. In Connection Wizard, set `Password source (env/keyring)` to `keyring`.
+2. Ensure `MYR_DB_PASSWORD` is exported, then connect once with `F5`.
+3. Exit app, unset the env var (`unset MYR_DB_PASSWORD`), and start app again.
+4. Reconnect using the same profile.
+
+Expected:
+
+- First connect succeeds and keyring storage is attempted for that profile.
+- Second connect works without `MYR_DB_PASSWORD` when OS keyring access is available.
+- If keyring is unavailable, connect should fail with a clear auth/connect error.
+
+## TLS Modes and Profile TLS Options
+
+Steps:
+
+1. In Connection Wizard, set `TLS mode` to `require` or `verify_identity`.
+2. Connect to a TLS-enabled MySQL instance.
+3. Optional: edit profile file (`~/.config/myr/profiles.toml` or `$MYR_CONFIG_DIR/myr/profiles.toml`) and set:
+   - `tls_ca_cert_path`
+   - `tls_client_cert_path`
+   - `tls_client_key_path`
+   - `tls_skip_domain_validation` / `tls_accept_invalid_certs` only for test/non-prod
+4. Reconnect and rerun query smoke tests.
+
+Expected:
+
+- Runtime bar reflects selected TLS mode.
+- TLS profile options are accepted and used by the adapter.
+- Strict verification should reject invalid/untrusted cert chains.
 
 ## Pane Navigation and Animation
 
@@ -173,6 +210,32 @@ Expected:
 
 - Status line shows match count and active match index.
 - Result cursor jumps between matched rows.
+
+## SQL Audit Trail
+
+Steps:
+
+1. Run one successful query and one failing query from Query Editor.
+2. Inspect audit file:
+
+```bash
+tail -n 20 ~/.config/myr/audit.ndjson
+```
+
+or if using custom config root:
+
+```bash
+tail -n 20 "$MYR_CONFIG_DIR/myr/audit.ndjson"
+```
+
+Expected:
+
+- Each query lifecycle emits JSON-line records with:
+  - `timestamp_unix_ms`
+  - `profile_name`
+  - `database`
+  - `outcome` (`started`, `succeeded`, `failed`, `cancelled`, `blocked`)
+- Success records include row/elapsed metadata; failed/blocked records include `error`.
 
 ## Resilience and Recovery
 

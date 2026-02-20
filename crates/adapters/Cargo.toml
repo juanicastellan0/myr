@@ -11,10 +11,19 @@ path = "src/lib.rs"
 async-trait = "0.1"
 futures-util = "0.3"
 myr-core = { path = "../core" }
-mysql_async = "0.35"
+mysql_async = { version = "0.35", features = ["default-rustls"] }
 serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["linux-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
