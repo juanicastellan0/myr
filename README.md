@@ -28,6 +28,8 @@ and benchmark/coverage gates. The detailed product backlog is in
 
 - Connection wizard with persisted profiles
 - Schema explorer lanes for databases, tables, and columns
+- Runtime status strip with animated app heartbeat + DB state (`[x]` disconnected, `[~]` connecting, `[+]` connected)
+- Pane tabs with active-pane flash animation on tab/view changes
 - Context-aware next actions in footer + command palette
 - Safe mode confirmation for destructive SQL
 - Table preview pagination:
@@ -50,6 +52,17 @@ and benchmark/coverage gates. The detailed product backlog is in
   - `MYR_DB_PASSWORD=root cargo run -p myr-app --bin benchmark -- --host 127.0.0.1 --port 33306 --user root --database myr_bench --seed-rows 50000`
 - One-command setup/run/teardown:
   - `bench/scripts/run_benchmark.sh`
+- One-command local connection test dataset:
+  - `scripts/dev-db-seed.sh`
+
+## Manual Testing
+
+- Manual smoke checklist and expected outcomes:
+  - `docs/manual-testing.md`
+- Quick seed + run path:
+  - `scripts/dev-db-seed.sh`
+  - `export MYR_DB_PASSWORD=root`
+  - `cargo run -p myr-app`
 
 ## Quality Gates
 

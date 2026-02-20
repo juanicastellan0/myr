@@ -62,6 +62,14 @@ cargo run -p myr-app --bin benchmark -- \
 bench/scripts/run_benchmark.sh
 ```
 
+## One-command Dev Dataset
+
+`scripts/dev-db-seed.sh` boots local MySQL and seeds an idempotent test dataset for manual TUI connection checks:
+
+```bash
+scripts/dev-db-seed.sh
+```
+
 ## CI Perf Smoke
 
 CI runs a benchmark smoke check in `.github/workflows/ci.yml` against a MySQL service with:

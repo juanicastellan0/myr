@@ -1,5 +1,7 @@
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -28,7 +30,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use ratatui::{Frame, Terminal};
 use thiserror::Error;
 
@@ -38,6 +40,7 @@ const FOOTER_ACTIONS_LIMIT: usize = 7;
 const RESULT_BUFFER_CAPACITY: usize = 2_000;
 const PREVIEW_PAGE_SIZE: usize = 200;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const PANE_FLASH_DURATION_TICKS: u8 = 8;
 
 const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
 const DEMO_SCHEMA_COLUMNS: [&str; 4] = ["id", "email", "created_at", "updated_at"];
@@ -214,12 +217,33 @@ struct PaginationState {
 }
 
 #[derive(Debug)]
+enum ConnectWorkerOutcome {
+    Success {
+        profile: ConnectionProfile,
+        connect_latency: Duration,
+        databases: Vec<String>,
+        warning: Option<String>,
+    },
+    Failure(String),
+}
+
+#[derive(Debug)]
+enum QueryWorkerOutcome {
+    Success {
+        results: ResultsRingBuffer<QueryRow>,
+        rows_streamed: u64,
+        was_cancelled: bool,
+        elapsed: Duration,
+    },
+    Failure(String),
+}
+
 struct TuiApp {
     actions: ActionsEngine,
     pane: Pane,
     wizard_form: ConnectionWizardForm,
     connected_profile: Option<String>,
-    connection_manager: Option<ConnectionManager<MysqlConnectionBackend>>,
+    last_connection_latency: Option<Duration>,
     data_backend: Option<MysqlDataBackend>,
     schema_cache: Option<SchemaCacheService<MysqlDataBackend>>,
     schema_databases: Vec<String>,
@@ -253,6 +277,12 @@ struct TuiApp {
     pending_page_transition: Option<PageTransition>,
     cancel_requested: bool,
     connect_requested: bool,
+    connect_result_rx: Option<Receiver<ConnectWorkerOutcome>>,
+    query_result_rx: Option<Receiver<QueryWorkerOutcome>>,
+    query_cancellation: Option<CancellationToken>,
+    loading_tick: usize,
+    pane_flash_ticks: u8,
+    exit_confirmation: bool,
     status_line: String,
     query_editor_text: String,
     selection: SchemaSelection,
@@ -265,7 +295,7 @@ impl Default for TuiApp {
             pane: Pane::ConnectionWizard,
             wizard_form: ConnectionWizardForm::default(),
             connected_profile: None,
-            connection_manager: None,
+            last_connection_latency: None,
             data_backend: None,
             schema_cache: None,
             schema_databases: vec!["app".to_string()],
@@ -309,6 +339,12 @@ impl Default for TuiApp {
             pending_page_transition: None,
             cancel_requested: false,
             connect_requested: false,
+            connect_result_rx: None,
+            query_result_rx: None,
+            query_cancellation: None,
+            loading_tick: 0,
+            pane_flash_ticks: 0,
+            exit_confirmation: false,
             status_line: "Select a field with Up/Down, press E to edit, F5 to connect".to_string(),
             query_editor_text: "SELECT * FROM `users`".to_string(),
             selection: SchemaSelection {
@@ -322,10 +358,21 @@ impl Default for TuiApp {
 
 impl TuiApp {
     fn handle(&mut self, msg: Msg) {
+        if self.exit_confirmation
+            && !matches!(msg, Msg::Quit | Msg::TogglePalette | Msg::Tick | Msg::CancelQuery)
+        {
+            self.status_line =
+                "Exit pending. Press Ctrl+C to confirm, F10 to exit now, Esc to cancel."
+                    .to_string();
+            return;
+        }
+
         match msg {
-            Msg::Quit => self.should_quit = true,
+            Msg::Quit => {
+                self.should_quit = true;
+            }
             Msg::GoConnectionWizard => {
-                self.pane = Pane::ConnectionWizard;
+                self.set_active_pane(Pane::ConnectionWizard);
                 if self.wizard_form.editing {
                     self.cancel_wizard_edit();
                 } else {
@@ -338,11 +385,22 @@ impl TuiApp {
                     self.status_line =
                         "Finish editing field first (Enter to save, Esc to cancel)".to_string();
                 } else {
-                    self.pane = self.pane.next();
+                    let next_pane = self.pane.next();
+                    self.set_active_pane(next_pane);
                     self.status_line = format!("Switched pane to {}", self.pane_name());
                 }
             }
             Msg::TogglePalette => {
+                if self.exit_confirmation {
+                    self.exit_confirmation = false;
+                    self.status_line = "Exit canceled".to_string();
+                    return;
+                }
+                if self.show_help {
+                    self.show_help = false;
+                    self.status_line = "Help closed".to_string();
+                    return;
+                }
                 if self.pane == Pane::ConnectionWizard && self.wizard_form.editing {
                     self.cancel_wizard_edit();
                     return;
@@ -379,10 +437,25 @@ impl TuiApp {
             Msg::Submit => self.submit(),
             Msg::Connect => self.connect(),
             Msg::CancelQuery => {
+                if !self.query_running {
+                    if self.exit_confirmation {
+                        self.should_quit = true;
+                    } else {
+                        self.exit_confirmation = true;
+                        self.status_line = "No active query. Exit myr? Press Ctrl+C again to confirm, F10 to exit now, Esc to cancel.".to_string();
+                    }
+                    return;
+                }
+
                 self.cancel_requested = true;
-                self.query_running = false;
-                self.query_ticks_remaining = 0;
-                self.status_line = "Cancel requested".to_string();
+                if let Some(cancellation) = &self.query_cancellation {
+                    cancellation.cancel();
+                    self.status_line = "Cancelling query...".to_string();
+                } else {
+                    self.query_running = false;
+                    self.query_ticks_remaining = 0;
+                    self.status_line = "Cancel requested".to_string();
+                }
             }
             Msg::Navigate(direction) => self.navigate(direction),
             Msg::InvokeActionSlot(index) => self.invoke_ranked_action(index),
@@ -394,11 +467,10 @@ impl TuiApp {
     }
 
     fn on_tick(&mut self) {
-        if self.connect_requested {
-            self.connect_requested = false;
-            self.connect_from_wizard();
-            return;
-        }
+        self.loading_tick = self.loading_tick.wrapping_add(1);
+        self.pane_flash_ticks = self.pane_flash_ticks.saturating_sub(1);
+        self.poll_connect_result();
+        self.poll_query_result();
 
         if self.query_running && self.data_backend.is_none() {
             if self.query_ticks_remaining == 0 {
@@ -409,6 +481,18 @@ impl TuiApp {
             } else {
                 self.query_ticks_remaining = self.query_ticks_remaining.saturating_sub(1);
             }
+        }
+
+        if self.connect_requested {
+            let spinner = spinner_char(self.loading_tick);
+            self.status_line = format!("Connecting... {spinner}");
+        } else if self.query_running && self.query_result_rx.is_some() {
+            let spinner = spinner_char(self.loading_tick);
+            self.status_line = if self.cancel_requested {
+                format!("Cancelling query... {spinner}")
+            } else {
+                format!("Running query... {spinner}")
+            };
         }
     }
 
@@ -473,11 +557,7 @@ impl TuiApp {
             if self.connect_requested {
                 self.status_line = "Already connecting...".to_string();
             } else {
-                self.connect_requested = true;
-                self.status_line = format!(
-                    "Connecting to {}:{} as {}...",
-                    self.wizard_form.host, self.wizard_form.port, self.wizard_form.user
-                );
+                self.connect_from_wizard();
             }
         } else {
             self.status_line = "Connect is only available in connection wizard".to_string();
@@ -485,13 +565,33 @@ impl TuiApp {
     }
 
     fn connect_from_wizard(&mut self) {
-        let port = match self.wizard_form.port.parse::<u16>() {
-            Ok(port) => port,
-            Err(_) => {
-                self.status_line = "Invalid port in connection wizard".to_string();
+        let profile = match self.wizard_profile() {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.status_line = error;
                 return;
             }
         };
+
+        let (tx, rx) = mpsc::channel();
+        self.connect_result_rx = Some(rx);
+        self.connect_requested = true;
+        self.status_line = format!(
+            "Connecting to {}:{} as {}...",
+            profile.host, profile.port, profile.user
+        );
+
+        let _connect_worker = thread::spawn(move || {
+            let _ = tx.send(run_connect_worker(profile));
+        });
+    }
+
+    fn wizard_profile(&self) -> Result<ConnectionProfile, String> {
+        let port = self
+            .wizard_form
+            .port
+            .parse::<u16>()
+            .map_err(|_| "Invalid port in connection wizard".to_string())?;
 
         let mut profile = ConnectionProfile::new(
             self.wizard_form.profile_name.clone(),
@@ -504,63 +604,60 @@ impl TuiApp {
         } else {
             Some(self.wizard_form.database.clone())
         };
+        Ok(profile)
+    }
 
-        let connection_backend = MysqlConnectionBackend;
-        let mut manager = ConnectionManager::new(connection_backend);
-        let connect_latency = match block_on_timeout_result(
-            manager.connect(profile.clone()),
-            CONNECT_TIMEOUT,
-            "connect",
-        ) {
-            Ok(latency) => latency,
-            Err(error) => {
-                self.status_line = format!("Connect failed: {error}");
-                return;
-            }
+    fn poll_connect_result(&mut self) {
+        let outcome = match self.connect_result_rx.as_ref() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(outcome) => Some(outcome),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    Some(ConnectWorkerOutcome::Failure("connect worker disconnected".to_string()))
+                }
+            },
+            None => None,
         };
+
+        let Some(outcome) = outcome else {
+            return;
+        };
+
+        self.connect_result_rx = None;
+        self.connect_requested = false;
+
+        match outcome {
+            ConnectWorkerOutcome::Success {
+                profile,
+                connect_latency,
+                databases,
+                warning,
+            } => {
+                self.apply_connected_profile(profile, connect_latency, databases, warning);
+            }
+            ConnectWorkerOutcome::Failure(error) => {
+                self.status_line = format!("Connect failed: {error}");
+            }
+        }
+    }
+
+    fn apply_connected_profile(
+        &mut self,
+        profile: ConnectionProfile,
+        connect_latency: Duration,
+        databases: Vec<String>,
+        warning: Option<String>,
+    ) {
+        self.last_connection_latency = Some(connect_latency);
 
         let data_backend = MysqlDataBackend::from_profile(&profile);
-        let mut schema_cache =
-            SchemaCacheService::new(data_backend.clone(), Duration::from_secs(10));
-        let databases = match block_on_timeout_result(
-            schema_cache.list_databases(),
-            CONNECT_TIMEOUT,
-            "schema fetch",
-        ) {
-            Ok(databases) => databases,
-            Err(error) => {
-                self.status_line = format!("Connected, but schema fetch failed: {error}");
-                Vec::new()
-            }
-        };
+        let schema_cache = SchemaCacheService::new(data_backend.clone(), Duration::from_secs(10));
 
         let mut active_database = profile.database.clone();
         if active_database.is_none() {
             active_database = databases.first().cloned();
         }
 
-        match FileProfilesStore::load_default() {
-            Ok(mut store) => {
-                store.upsert_profile(profile.clone());
-                if let Err(error) = store.persist() {
-                    self.status_line = format!(
-                        "Connected in {:.1?} (profile save failed: {error})",
-                        connect_latency
-                    );
-                } else {
-                    self.status_line =
-                        format!("Connected as `{}` in {:.1?}", profile.name, connect_latency);
-                }
-            }
-            Err(error) => {
-                self.status_line = format!(
-                    "Connected in {:.1?} (profile load failed: {error})",
-                    connect_latency
-                );
-            }
-        }
-
-        self.connection_manager = Some(manager);
         self.data_backend = Some(data_backend);
         self.schema_cache = Some(schema_cache);
         self.schema_databases = databases;
@@ -589,7 +686,77 @@ impl TuiApp {
         };
         self.clear_pagination_state();
         self.set_query_editor_to_selected_table();
-        self.pane = Pane::SchemaExplorer;
+        self.set_active_pane(Pane::SchemaExplorer);
+
+        let mut notes = Vec::new();
+        if let Some(warning) = warning {
+            notes.push(warning);
+        }
+
+        match FileProfilesStore::load_default() {
+            Ok(mut store) => {
+                store.upsert_profile(profile.clone());
+                if let Err(error) = store.persist() {
+                    notes.push(format!("profile save failed: {error}"));
+                }
+            }
+            Err(error) => notes.push(format!("profile load failed: {error}")),
+        }
+
+        let mut status = format!("Connected as `{}` in {:.1?}", profile.name, connect_latency);
+        if !notes.is_empty() {
+            status.push_str(" (");
+            status.push_str(&notes.join("; "));
+            status.push(')');
+        }
+        self.status_line = status;
+    }
+
+    fn poll_query_result(&mut self) {
+        let outcome = match self.query_result_rx.as_ref() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(outcome) => Some(outcome),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    Some(QueryWorkerOutcome::Failure("query worker disconnected".to_string()))
+                }
+            },
+            None => None,
+        };
+
+        let Some(outcome) = outcome else {
+            return;
+        };
+
+        self.query_result_rx = None;
+        self.query_cancellation = None;
+        self.query_running = false;
+
+        match outcome {
+            QueryWorkerOutcome::Success {
+                results,
+                rows_streamed,
+                was_cancelled,
+                elapsed,
+            } => {
+                self.results = results;
+                self.has_results = !self.results.is_empty();
+                self.results_cursor = 0;
+                self.finalize_pagination_after_query();
+                self.status_line = if was_cancelled {
+                    format!("Query cancelled after {rows_streamed} rows in {elapsed:.1?}")
+                } else {
+                    format!("Query returned {rows_streamed} rows in {elapsed:.1?}")
+                };
+            }
+            QueryWorkerOutcome::Failure(error) => {
+                self.pending_page_transition = None;
+                self.has_results = !self.results.is_empty();
+                self.status_line = format!("Query failed: {error}");
+            }
+        }
+
+        self.cancel_requested = false;
     }
 
     fn navigate(&mut self, direction: DirectionKey) {
@@ -1098,38 +1265,28 @@ impl TuiApp {
 
     fn start_query(&mut self, sql: String) {
         self.query_editor_text = sql;
-        self.pane = Pane::Results;
+        self.set_active_pane(Pane::Results);
         self.cancel_requested = false;
         self.has_results = false;
+        self.query_cancellation = None;
+        self.query_result_rx = None;
 
         if let Some(data_backend) = &self.data_backend {
             self.query_running = true;
             self.query_ticks_remaining = 0;
             self.results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
-            let runner = QueryRunner::new(data_backend.clone());
             let cancellation = CancellationToken::new();
+            self.query_cancellation = Some(cancellation.clone());
+            let backend = data_backend.clone();
+            let sql = self.query_editor_text.clone();
+            let (tx, rx) = mpsc::channel();
+            self.query_result_rx = Some(rx);
 
-            match block_on_result(runner.execute_streaming(
-                &self.query_editor_text,
-                &mut self.results,
-                &cancellation,
-            )) {
-                Ok(summary) => {
-                    self.query_running = false;
-                    self.has_results = !self.results.is_empty();
-                    self.results_cursor = 0;
-                    self.finalize_pagination_after_query();
-                    self.status_line = format!(
-                        "Query returned {} rows in {:.1?}",
-                        summary.rows_streamed, summary.elapsed
-                    );
-                }
-                Err(error) => {
-                    self.query_running = false;
-                    self.pending_page_transition = None;
-                    self.status_line = format!("Query failed: {error}");
-                }
-            }
+            let _query_worker = thread::spawn(move || {
+                let _ = tx.send(run_query_worker(backend, sql, cancellation));
+            });
+
+            self.status_line = "Running query...".to_string();
             return;
         }
 
@@ -1147,7 +1304,7 @@ impl TuiApp {
             GuardDecision::RequireConfirmation { token, assessment } => {
                 self.pending_confirmation = Some((token, sql.clone()));
                 self.query_editor_text = sql;
-                self.pane = Pane::QueryEditor;
+                self.set_active_pane(Pane::QueryEditor);
                 self.status_line = format!(
                     "Safe mode confirmation required: {:?}. Press Enter again to confirm.",
                     assessment.reasons
@@ -1383,13 +1540,14 @@ impl TuiApp {
                 self.status_line = format!("Copy requested: {target:?}");
             }
             ActionInvocation::OpenView(view) => {
-                self.pane = match view {
+                let pane = match view {
                     AppView::ConnectionWizard => Pane::ConnectionWizard,
                     AppView::SchemaExplorer => Pane::SchemaExplorer,
                     AppView::Results => Pane::Results,
                     AppView::QueryEditor => Pane::QueryEditor,
                     AppView::CommandPalette => self.pane,
                 };
+                self.set_active_pane(pane);
                 self.status_line = format!("Switched view to {}", self.pane_name());
             }
             ActionInvocation::SearchBufferedResults => {
@@ -1425,12 +1583,46 @@ impl TuiApp {
         }
     }
 
+    fn pane_tab_index(&self) -> usize {
+        match self.pane {
+            Pane::ConnectionWizard => 0,
+            Pane::SchemaExplorer => 1,
+            Pane::Results => 2,
+            Pane::QueryEditor => 3,
+        }
+    }
+
+    fn runtime_state_label(&self) -> &'static str {
+        if self.connect_requested || self.query_running {
+            "BUSY"
+        } else {
+            "IDLE"
+        }
+    }
+
+    fn connection_state_label(&self) -> &'static str {
+        if self.connect_requested {
+            "CONNECTING"
+        } else if self.data_backend.is_some() {
+            "CONNECTED"
+        } else {
+            "DISCONNECTED"
+        }
+    }
+
     fn pane_name(&self) -> &'static str {
         match self.pane {
             Pane::ConnectionWizard => "Connection Wizard",
             Pane::SchemaExplorer => "Schema Explorer",
             Pane::Results => "Results",
             Pane::QueryEditor => "Query Editor",
+        }
+    }
+
+    fn set_active_pane(&mut self, pane: Pane) {
+        if self.pane != pane {
+            self.pane = pane;
+            self.pane_flash_ticks = PANE_FLASH_DURATION_TICKS;
         }
     }
 }
@@ -1514,27 +1706,71 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(6),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .split(frame.area());
+    let top_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(3)])
+        .split(chunks[0]);
 
     let latency_text = app
-        .connection_manager
-        .as_ref()
-        .and_then(|manager| manager.status().last_latency)
+        .last_connection_latency
         .map_or("n/a".to_string(), |latency| format!("{latency:.1?}"));
-    let cache_ttl_text = app
-        .schema_cache
-        .as_ref()
-        .map_or("n/a".to_string(), |cache| format!("{:.1?}", cache.ttl()));
+    let heartbeat = spinner_char(app.loading_tick);
+    let loading_text = if app.connect_requested {
+        "connecting"
+    } else if app.query_running && app.cancel_requested {
+        "cancelling query"
+    } else if app.query_running {
+        "querying"
+    } else {
+        "idle"
+    };
+    let runtime_state = app.runtime_state_label();
+    let runtime_state_color = if runtime_state == "BUSY" {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    let connection_state = app.connection_state_label();
+    let (connection_badge, connection_marker) =
+        connection_badge_and_marker(connection_state, app.loading_tick);
+    let connection_color = match connection_state {
+        "CONNECTED" => {
+            if app.loading_tick % 2 == 0 {
+                Color::Green
+            } else {
+                Color::Cyan
+            }
+        }
+        "CONNECTING" => Color::Yellow,
+        _ => Color::Red,
+    };
 
-    let header = Paragraph::new(Line::from(vec![
+    let runtime_bar = Paragraph::new(Line::from(vec![
         Span::styled(
-            format!(" Pane: {} ", app.pane_name()),
+            format!(" APP {heartbeat} "),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::raw("State: "),
+        Span::styled(
+            runtime_state,
+            Style::default()
+                .fg(runtime_state_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::raw("DB: "),
+        Span::styled(
+            format!("{connection_badge} {connection_state} {connection_marker}"),
+            Style::default()
+                .fg(connection_color)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
@@ -1550,48 +1786,72 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         Span::raw(" | "),
         Span::raw(format!("Latency: {latency_text}")),
         Span::raw(" | "),
-        Span::raw(format!("Schema TTL: {cache_ttl_text}")),
-        Span::raw(" | "),
-        Span::raw(format!(
-            "SAFE mode: {}",
-            if app.safe_mode_guard.is_enabled() {
-                if app.pending_confirmation.is_some() {
-                    "confirming"
-                } else {
-                    "on"
-                }
-            } else {
-                "off"
-            }
-        )),
-        Span::raw(" | "),
         Span::raw(format!(
             "Query: {}",
             if app.query_running { "running" } else { "idle" }
         )),
         Span::raw(" | "),
-        Span::raw(format!(
-            "Palette: {}",
-            if app.show_palette { "open" } else { "closed" }
-        )),
-        Span::raw(" | "),
-        Span::raw(if app.show_perf_overlay {
-            format!(
-                "Perf: {:.1}ms {:.1}fps rows:{}",
-                app.last_render_ms,
-                app.fps,
-                app.results.len()
-            )
-        } else {
-            "Perf: off (F2)".to_string()
-        }),
+        Span::raw(format!("Load: {loading_text}")),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Fast MySQL TUI"),
+            .title("Runtime"),
     );
-    frame.render_widget(header, chunks[0]);
+    frame.render_widget(runtime_bar, top_chunks[0]);
+
+    let tab_focus_marker = pulse_char(app.loading_tick);
+    let tabs_title = if app.pane_flash_ticks > 0 {
+        format!(
+            "Panes (Tab cycles, F6 returns to Connection Wizard) | Active: {} {}",
+            app.pane_name(),
+            tab_focus_marker
+        )
+    } else {
+        "Panes (Tab cycles, F6 returns to Connection Wizard)".to_string()
+    };
+    let tab_labels = [
+        (Pane::ConnectionWizard, "Connection Wizard"),
+        (Pane::SchemaExplorer, "Schema Explorer"),
+        (Pane::Results, "Results"),
+        (Pane::QueryEditor, "Query Editor"),
+    ]
+    .into_iter()
+    .map(|(pane, label)| {
+        if pane == app.pane && app.pane_flash_ticks > 0 {
+            Line::from(format!("{label} {tab_focus_marker}"))
+        } else {
+            Line::from(label)
+        }
+    })
+    .collect::<Vec<_>>();
+    let tab_highlight_style = if app.pane_flash_ticks > 0 {
+        let flash_bg = if app.loading_tick % 2 == 0 {
+            Color::Yellow
+        } else {
+            Color::Cyan
+        };
+        Style::default()
+            .fg(Color::Black)
+            .bg(flash_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let tabs = Tabs::new(tab_labels)
+    .select(app.pane_tab_index())
+    .style(Style::default().fg(Color::DarkGray))
+    .highlight_style(tab_highlight_style)
+    .divider(" | ")
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(tabs_title),
+    );
+    frame.render_widget(tabs, top_chunks[1]);
 
     let body_text = match app.pane {
         Pane::ConnectionWizard => {
@@ -1761,7 +2021,11 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             }
 
             if lines.len() == 2 {
-                lines.push(Line::from("No rows buffered"));
+                lines.push(Line::from(if app.query_running {
+                    "Query running... waiting for rows"
+                } else {
+                    "No rows buffered. Tab to Query Editor + Enter, or use 1 in Schema Explorer."
+                }));
             }
             lines
         }
@@ -1780,7 +2044,8 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     frame.render_widget(body, chunks[1]);
 
     let footer_line = if app.pane == Pane::ConnectionWizard {
-        "F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit".to_string()
+        "F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit"
+            .to_string()
     } else {
         let actions = app
             .actions
@@ -1809,6 +2074,9 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     if app.show_help {
         render_help_popup(frame);
     }
+    if app.exit_confirmation {
+        render_exit_popup(frame);
+    }
 }
 
 fn render_help_popup(frame: &mut Frame<'_>) {
@@ -1816,7 +2084,7 @@ fn render_help_popup(frame: &mut Frame<'_>) {
     frame.render_widget(Clear, area);
     let help = Paragraph::new(vec![
         Line::from("Global keymap"),
-        Line::from("F10: quit"),
+        Line::from("F10: quit immediately"),
         Line::from("F6: go to connection wizard"),
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
@@ -1826,12 +2094,27 @@ fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("F3: toggle safe mode"),
         Line::from("Ctrl+P: command palette"),
         Line::from("Ctrl+U: clear current input"),
-        Line::from("Ctrl+C: cancel active query"),
+        Line::from("Ctrl+C: cancel query (or request exit if idle)"),
         Line::from("Arrows (or Alt+h/j/k/l): navigation"),
         Line::from("1..7: invoke ranked action slot"),
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"));
     frame.render_widget(help, area);
+}
+
+fn render_exit_popup(frame: &mut Frame<'_>) {
+    let area = centered_rect(50, 25, frame.area());
+    frame.render_widget(Clear, area);
+    let content = Paragraph::new(vec![
+        Line::from("Exit myr now?"),
+        Line::from(""),
+        Line::from("Ctrl+C: confirm exit"),
+        Line::from("F10: exit now"),
+        Line::from("Esc: cancel and return"),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("Confirm Exit"))
+    .alignment(Alignment::Center);
+    frame.render_widget(content, area);
 }
 
 fn render_palette_popup(frame: &mut Frame<'_>, app: &TuiApp) {
@@ -1894,6 +2177,123 @@ fn centered_rect(width_percent: u16, height_percent: u16, area: Rect) -> Rect {
             Constraint::Percentage((100_u16 - width_percent) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+fn spinner_char(tick: usize) -> char {
+    const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+    FRAMES[tick % FRAMES.len()]
+}
+
+fn pulse_char(tick: usize) -> char {
+    const FRAMES: [char; 4] = ['.', 'o', 'O', 'o'];
+    FRAMES[tick % FRAMES.len()]
+}
+
+fn connection_badge_and_marker(connection_state: &str, tick: usize) -> (&'static str, char) {
+    match connection_state {
+        "CONNECTED" => ("[+]", pulse_char(tick)),
+        "CONNECTING" => ("[~]", spinner_char(tick)),
+        _ => ("[x]", if tick % 2 == 0 { '-' } else { ' ' }),
+    }
+}
+
+fn run_connect_worker(profile: ConnectionProfile) -> ConnectWorkerOutcome {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return ConnectWorkerOutcome::Failure(format!(
+                "failed to create runtime: {error}"
+            ));
+        }
+    };
+
+    runtime.block_on(async move {
+        let mut manager = ConnectionManager::new(MysqlConnectionBackend);
+        let connect_latency = match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            manager.connect(profile.clone()),
+        )
+        .await
+        {
+            Ok(Ok(latency)) => latency,
+            Ok(Err(error)) => return ConnectWorkerOutcome::Failure(error.to_string()),
+            Err(_) => {
+                return ConnectWorkerOutcome::Failure(format!(
+                    "connect timed out after {:.1?}",
+                    CONNECT_TIMEOUT
+                ));
+            }
+        };
+
+        let mut warnings = Vec::new();
+        match tokio::time::timeout(CONNECT_TIMEOUT, manager.disconnect()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warnings.push(format!("disconnect warning: {error}")),
+            Err(_) => warnings.push(format!(
+                "disconnect timed out after {:.1?}",
+                CONNECT_TIMEOUT
+            )),
+        }
+
+        let data_backend = MysqlDataBackend::from_profile(&profile);
+        let mut schema_cache = SchemaCacheService::new(data_backend.clone(), Duration::from_secs(10));
+        let databases = match tokio::time::timeout(CONNECT_TIMEOUT, schema_cache.list_databases()).await {
+            Ok(Ok(databases)) => databases,
+            Ok(Err(error)) => {
+                warnings.push(format!("schema fetch failed: {error}"));
+                Vec::new()
+            }
+            Err(_) => {
+                warnings.push(format!(
+                    "schema fetch timed out after {:.1?}",
+                    CONNECT_TIMEOUT
+                ));
+                Vec::new()
+            }
+        };
+
+        if let Err(error) = data_backend.disconnect().await {
+            warnings.push(format!("schema backend disconnect warning: {error}"));
+        }
+
+        ConnectWorkerOutcome::Success {
+            profile,
+            connect_latency,
+            databases,
+            warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+        }
+    })
+}
+
+fn run_query_worker(
+    backend: MysqlDataBackend,
+    sql: String,
+    cancellation: CancellationToken,
+) -> QueryWorkerOutcome {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return QueryWorkerOutcome::Failure(format!("failed to create runtime: {error}"));
+        }
+    };
+
+    let runner = QueryRunner::new(backend);
+    let mut results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
+    match runtime.block_on(runner.execute_streaming(&sql, &mut results, &cancellation)) {
+        Ok(summary) => QueryWorkerOutcome::Success {
+            results,
+            rows_streamed: summary.rows_streamed,
+            was_cancelled: summary.was_cancelled,
+            elapsed: summary.elapsed,
+        },
+        Err(error) => QueryWorkerOutcome::Failure(error.to_string()),
+    }
 }
 
 fn quote_identifier(identifier: &str) -> String {
@@ -1959,27 +2359,6 @@ where
     runtime.block_on(future).map_err(|error| error.to_string())
 }
 
-fn block_on_timeout_result<T, E, F>(
-    future: F,
-    timeout: Duration,
-    operation_name: &str,
-) -> Result<T, String>
-where
-    E: std::fmt::Display,
-    F: std::future::Future<Output = Result<T, E>>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("failed to create runtime: {error}"))?;
-
-    let result = runtime
-        .block_on(async { tokio::time::timeout(timeout, future).await })
-        .map_err(|_| format!("{operation_name} timed out after {:.1?}", timeout))?;
-
-    result.map_err(|error| error.to_string())
-}
-
 fn map_key_event(key: KeyEvent) -> Option<Msg> {
     if key.modifiers == KeyModifiers::CONTROL {
         return match key.code {
@@ -2034,16 +2413,19 @@ fn suggest_limit_in_editor(query: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use myr_core::actions_engine::CopyTarget;
+    use myr_core::profiles::ConnectionProfile;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
     use super::{
-        candidate_key_column, centered_rect, extract_key_bounds, map_key_event, quote_identifier,
-        render, suggest_limit_in_editor, ActionId, ActionInvocation, AppView, DirectionKey, Msg,
-        PaginationPlan, Pane, QueryRow, ResultsRingBuffer, SchemaLane, TuiApp, WizardField,
-        QUERY_DURATION_TICKS,
+        candidate_key_column, centered_rect, connection_badge_and_marker, extract_key_bounds,
+        map_key_event, quote_identifier, render, suggest_limit_in_editor, ActionId,
+        ActionInvocation, AppView, DirectionKey, Msg, MysqlDataBackend, PaginationPlan, Pane,
+        QueryRow, ResultsRingBuffer, SchemaLane, TuiApp, WizardField, QUERY_DURATION_TICKS,
     };
 
     fn app_in_pane(pane: Pane) -> TuiApp {
@@ -2059,10 +2441,51 @@ mod tests {
         }
     }
 
+    fn drive_connect_to_completion(app: &mut TuiApp) {
+        for _ in 0..300 {
+            if !app.connect_requested || app.status_line.starts_with("Connect failed:") {
+                break;
+            }
+            app.on_tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn render_once(app: &TuiApp) {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal.draw(|frame| render(frame, app)).expect("render");
+    }
+
+    fn drive_query_worker_to_completion(app: &mut TuiApp) {
+        for _ in 0..500 {
+            if !app.query_running {
+                break;
+            }
+            app.on_tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn mysql_tui_integration_enabled() -> bool {
+        matches!(
+            std::env::var("MYR_RUN_TUI_MYSQL_INTEGRATION").ok().as_deref(),
+            Some("1")
+        )
+    }
+
+    fn mysql_integration_profile(database: Option<&str>) -> ConnectionProfile {
+        let host = std::env::var("MYR_TEST_DB_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let user = std::env::var("MYR_TEST_DB_USER").unwrap_or_else(|_| "root".to_string());
+        let port = std::env::var("MYR_TEST_DB_PORT")
+            .ok()
+            .and_then(|raw| raw.parse::<u16>().ok())
+            .unwrap_or(3306);
+
+        let mut profile = ConnectionProfile::new("tui-integration", host, user);
+        profile.port = port;
+        profile.database = database.map(str::to_string);
+        profile
     }
 
     #[test]
@@ -2071,6 +2494,59 @@ mod tests {
         assert_eq!(Pane::SchemaExplorer.next(), Pane::Results);
         assert_eq!(Pane::Results.next(), Pane::QueryEditor);
         assert_eq!(Pane::QueryEditor.next(), Pane::SchemaExplorer);
+    }
+
+    #[test]
+    fn pane_tab_index_matches_current_pane() {
+        assert_eq!(app_in_pane(Pane::ConnectionWizard).pane_tab_index(), 0);
+        assert_eq!(app_in_pane(Pane::SchemaExplorer).pane_tab_index(), 1);
+        assert_eq!(app_in_pane(Pane::Results).pane_tab_index(), 2);
+        assert_eq!(app_in_pane(Pane::QueryEditor).pane_tab_index(), 3);
+    }
+
+    #[test]
+    fn pane_switch_triggers_tab_flash_animation() {
+        let mut app = app_in_pane(Pane::SchemaExplorer);
+        assert_eq!(app.pane_flash_ticks, 0);
+
+        app.handle(Msg::NextPane);
+
+        assert_eq!(app.pane, Pane::Results);
+        assert!(app.pane_flash_ticks > 0);
+
+        let before_tick = app.pane_flash_ticks;
+        app.on_tick();
+        assert!(app.pane_flash_ticks < before_tick);
+    }
+
+    #[test]
+    fn connection_badges_reflect_state() {
+        assert_eq!(connection_badge_and_marker("CONNECTED", 0).0, "[+]");
+        assert_eq!(connection_badge_and_marker("CONNECTING", 0).0, "[~]");
+        assert_eq!(connection_badge_and_marker("DISCONNECTED", 0).0, "[x]");
+    }
+
+    #[test]
+    fn runtime_and_connection_labels_reflect_state() {
+        let mut app = TuiApp::default();
+        assert_eq!(app.runtime_state_label(), "IDLE");
+        assert_eq!(app.connection_state_label(), "DISCONNECTED");
+
+        app.query_running = true;
+        assert_eq!(app.runtime_state_label(), "BUSY");
+        app.query_running = false;
+
+        app.connect_requested = true;
+        assert_eq!(app.connection_state_label(), "CONNECTING");
+
+        app.connect_requested = false;
+        let profile = ConnectionProfile::new(
+            "test".to_string(),
+            "127.0.0.1".to_string(),
+            "root".to_string(),
+        );
+        app.data_backend = Some(MysqlDataBackend::from_profile(&profile));
+        assert_eq!(app.connection_state_label(), "CONNECTED");
     }
 
     #[test]
@@ -2488,6 +2964,10 @@ mod tests {
 
         let editor = app_in_pane(Pane::QueryEditor);
         render_once(&editor);
+
+        let mut exit_confirm = app_in_pane(Pane::Results);
+        exit_confirm.exit_confirmation = true;
+        render_once(&exit_confirm);
     }
 
     #[test]
@@ -2515,11 +2995,18 @@ mod tests {
         assert!(!app.safe_mode_guard.is_enabled());
 
         app.handle(Msg::CancelQuery);
-        assert!(app.cancel_requested);
-        assert_eq!(app.status_line, "Cancel requested");
+        assert!(!app.cancel_requested);
+        assert!(app.exit_confirmation);
+        assert!(app
+            .status_line
+            .starts_with("No active query. Exit myr?"));
+
+        app.handle(Msg::TogglePalette);
+        assert!(!app.exit_confirmation);
 
         app.handle(Msg::Quit);
         assert!(app.should_quit);
+        assert!(!app.exit_confirmation);
     }
 
     #[test]
@@ -2563,7 +3050,47 @@ mod tests {
         app.wizard_form.user = "root".to_string();
 
         app.connect_from_wizard();
+        drive_connect_to_completion(&mut app);
+        assert!(!app.connect_requested);
         assert!(app.status_line.starts_with("Connect failed:"));
+    }
+
+    #[test]
+    fn mysql_query_path_streams_rows_when_enabled() {
+        if !mysql_tui_integration_enabled() {
+            return;
+        }
+
+        let database =
+            std::env::var("MYR_TEST_DB_DATABASE").unwrap_or_else(|_| "myr_bench".to_string());
+        let profile = mysql_integration_profile(Some(&database));
+
+        let mut app = app_in_pane(Pane::QueryEditor);
+        app.data_backend = Some(MysqlDataBackend::from_profile(&profile));
+        app.selection.database = Some(database.clone());
+        app.selection.table = Some("events".to_string());
+        app.selection.column = Some("id".to_string());
+        app.query_editor_text =
+            format!("SELECT id, user_id FROM `{database}`.`events` ORDER BY id LIMIT 5");
+
+        app.submit();
+        drive_query_worker_to_completion(&mut app);
+
+        assert!(
+            !app.query_running,
+            "query did not complete; status was: {}",
+            app.status_line
+        );
+        assert!(
+            !app.results.is_empty(),
+            "query returned no buffered rows; status was: {}",
+            app.status_line
+        );
+        assert!(
+            app.status_line.starts_with("Query returned"),
+            "expected successful query status, got: {}",
+            app.status_line
+        );
     }
 
     #[test]
@@ -2572,10 +3099,6 @@ mod tests {
         app.wizard_form.port = "not-a-port".to_string();
 
         app.handle(Msg::Connect);
-        assert!(app.connect_requested);
-        assert!(app.status_line.starts_with("Connecting to "));
-
-        app.on_tick();
         assert!(!app.connect_requested);
         assert_eq!(app.status_line, "Invalid port in connection wizard");
     }
@@ -2602,5 +3125,29 @@ mod tests {
 
         assert_eq!(app.pane, Pane::ConnectionWizard);
         assert_eq!(app.status_line, "Returned to Connection Wizard");
+    }
+
+    #[test]
+    fn esc_path_cancels_exit_confirmation() {
+        let mut app = app_in_pane(Pane::Results);
+
+        app.handle(Msg::CancelQuery);
+        assert!(app.exit_confirmation);
+
+        app.handle(Msg::TogglePalette);
+        assert!(!app.exit_confirmation);
+        assert_eq!(app.status_line, "Exit canceled");
+    }
+
+    #[test]
+    fn ctrl_c_path_can_confirm_exit_when_no_query_is_running() {
+        let mut app = app_in_pane(Pane::Results);
+
+        app.handle(Msg::CancelQuery);
+        assert!(app.exit_confirmation);
+        assert!(!app.should_quit);
+
+        app.handle(Msg::CancelQuery);
+        assert!(app.should_quit);
     }
 }

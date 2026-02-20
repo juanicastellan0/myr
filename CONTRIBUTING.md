@@ -21,8 +21,12 @@ Thanks for contributing.
 ## CI quality gates
 
 - CI enforces formatting, clippy, tests, build, perf smoke checks, and coverage.
-- Coverage gate currently requires at least `75%` line coverage.
+- Coverage gate currently requires at least `80%` line coverage.
 - See `.github/workflows/ci.yml` and `docs/quality.md`.
+
+## Agent workflow
+
+If you are contributing via an automated coding agent, follow `AGENTS.md`.
 
 ## Commit style
 
