@@ -56,7 +56,7 @@
 
 ## M8: Power-user workflows and scale
 
-- [ ] Foreign-key relationship navigation (jump across related tables)
-- [ ] Saved views/bookmarks for schema targets and queries
-- [ ] Extended export options (streaming JSON/CSV improvements, compressed output)
-- [ ] Perf trend tracking in CI for regression detection over time
+- [x] Foreign-key relationship navigation (jump across related tables)
+- [x] Saved views/bookmarks for schema targets and queries
+- [x] Extended export options (streaming JSON/CSV improvements, compressed output)
+- [x] Perf trend tracking in CI for regression detection over time

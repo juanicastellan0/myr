@@ -4,7 +4,7 @@ Terminal-first MySQL/MariaDB schema and data explorer focused on speed, guided a
 
 ## Status
 
-M0-M7 roadmap milestones are implemented for explorer/navigation, guided actions, reliability,
+M0-M8 roadmap milestones are implemented for explorer/navigation, guided actions, reliability,
 query UX, and security hardening. Current and upcoming milestone tracking is in `docs/roadmap.md`.
 
 ## Workspace Layout
@@ -39,11 +39,13 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 - Results search mode with buffered match navigation
 - Query editor upgrades: multiline editing, cursor movement, and query history recall
 - Guided query actions: server-side filter/sort builder, EXPLAIN preflight, and SQL snippets
+- Foreign-key relationship navigation action to jump across related tables
+- Saved bookmarks for schema targets + query text (persisted in `bookmarks.toml`)
 - Table preview pagination:
   - Keyset pagination for detected `id` / `*_id` keys
   - OFFSET fallback when keyset is unavailable
-- Export to CSV/JSON
-- Benchmark runner + perf smoke checks
+- Export to streaming CSV/JSON plus JSONL and gzip variants
+- Benchmark runner + CI perf smoke checks with persisted perf metric artifacts
 
 ## Visual Status Cues
 

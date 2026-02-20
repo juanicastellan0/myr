@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = "0.1"
+flate2 = "1"
 futures-util = "0.3"
 myr-core = { path = "../core" }
 mysql_async = { version = "0.35", features = ["default-rustls"] }

@@ -12,18 +12,22 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use myr_adapters::export::{export_rows_to_csv, export_rows_to_json};
+use myr_adapters::export::{
+    export_rows_to_csv, export_rows_to_csv_with_options, export_rows_to_json,
+    export_rows_to_json_with_options, ExportCompression, JsonExportFormat,
+};
 use myr_adapters::mysql::{MysqlConnectionBackend, MysqlDataBackend};
 use myr_core::actions_engine::{
     ActionContext, ActionId, ActionInvocation, ActionsEngine, AppView, SchemaSelection,
 };
 use myr_core::audit_trail::{unix_timestamp_millis, AuditOutcome, AuditRecord, FileAuditTrail};
+use myr_core::bookmarks::{FileBookmarksStore, SavedBookmark};
 use myr_core::connection_manager::ConnectionManager;
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore, PasswordSource, TlsMode};
 use myr_core::query_runner::{CancellationToken, QueryRow, QueryRunner};
 use myr_core::results_buffer::ResultsRingBuffer;
 use myr_core::safe_mode::{assess_sql_safety, ConfirmationToken, GuardDecision, SafeModeGuard};
-use myr_core::schema_cache::SchemaCacheService;
+use myr_core::schema_cache::{RelationshipDirection, SchemaCacheService, TableRelationship};
 use myr_core::sql_generator::{
     keyset_first_page_sql, keyset_page_sql, offset_page_sql, PaginationDirection, SqlTarget,
 };
@@ -47,6 +51,7 @@ const AUTO_RECONNECT_LIMIT: u8 = 2;
 const PANE_FLASH_DURATION_TICKS: u8 = 8;
 const AUDIT_SQL_MAX_CHARS: usize = 1_000;
 const AUDIT_ERROR_MAX_CHARS: usize = 400;
+const BOOKMARK_NAME_MAX_CHARS: usize = 64;
 
 const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
 const DEMO_SCHEMA_COLUMNS: [&str; 4] = ["id", "email", "created_at", "updated_at"];
@@ -295,6 +300,8 @@ struct TuiApp {
     selected_table_index: usize,
     schema_columns: Vec<String>,
     selected_column_index: usize,
+    schema_relationships: Vec<TableRelationship>,
+    selected_relationship_index: usize,
     schema_lane: SchemaLane,
     show_help: bool,
     show_palette: bool,
@@ -338,6 +345,8 @@ struct TuiApp {
     exit_confirmation: bool,
     status_line: String,
     audit_trail: Option<FileAuditTrail>,
+    bookmark_store: Option<FileBookmarksStore>,
+    bookmark_cycle_index: usize,
     query_editor_text: String,
     query_cursor: usize,
     query_history: Vec<String>,
@@ -369,6 +378,8 @@ impl Default for TuiApp {
                 .map(|column| (*column).to_string())
                 .collect(),
             selected_column_index: 0,
+            schema_relationships: demo_relationships(Some("app"), Some("users")),
+            selected_relationship_index: 0,
             schema_lane: SchemaLane::Tables,
             show_help: false,
             show_palette: false,
@@ -416,6 +427,8 @@ impl Default for TuiApp {
             exit_confirmation: false,
             status_line: "Select a field with Up/Down, press E to edit, F5 to connect".to_string(),
             audit_trail: default_audit_trail(),
+            bookmark_store: default_bookmark_store(),
+            bookmark_cycle_index: 0,
             query_editor_text: "SELECT * FROM `users`".to_string(),
             query_cursor: "SELECT * FROM `users`".len(),
             query_history: Vec::new(),
@@ -929,6 +942,8 @@ impl TuiApp {
         self.schema_columns.clear();
         self.selected_column_index = 0;
         self.selection.column = None;
+        self.schema_relationships.clear();
+        self.selected_relationship_index = 0;
         self.reload_tables_for_active_database();
         self.schema_lane = if self.schema_tables.is_empty() {
             SchemaLane::Databases
@@ -1299,6 +1314,8 @@ impl TuiApp {
             self.schema_columns.clear();
             self.selected_column_index = 0;
             self.selection.column = None;
+            self.schema_relationships.clear();
+            self.selected_relationship_index = 0;
             return;
         };
 
@@ -1324,6 +1341,36 @@ impl TuiApp {
 
         self.selected_column_index = 0;
         self.selection.column = self.schema_columns.first().cloned();
+        self.reload_relationships_for_selected_table();
+    }
+
+    fn reload_relationships_for_selected_table(&mut self) {
+        let Some(table_name) = self.selection.table.clone() else {
+            self.schema_relationships.clear();
+            self.selected_relationship_index = 0;
+            return;
+        };
+
+        if let Some(schema_cache) = self.schema_cache.as_mut() {
+            if let Some(database_name) = self.active_database.clone() {
+                self.schema_relationships = match block_on_result(
+                    schema_cache.list_related_tables(&database_name, &table_name),
+                ) {
+                    Ok(relationships) => relationships,
+                    Err(error) => {
+                        self.status_line = format!("Relationship fetch failed: {error}");
+                        Vec::new()
+                    }
+                };
+            } else {
+                self.schema_relationships.clear();
+            }
+        } else {
+            self.schema_relationships =
+                demo_relationships(self.active_database.as_deref(), Some(table_name.as_str()));
+        }
+
+        self.selected_relationship_index = 0;
     }
 
     fn set_query_editor_to_selected_table(&mut self) {
@@ -1475,6 +1522,10 @@ impl TuiApp {
         let file_path = export_file_path(match format {
             myr_core::actions_engine::ExportFormat::Csv => "csv",
             myr_core::actions_engine::ExportFormat::Json => "json",
+            myr_core::actions_engine::ExportFormat::CsvGzip => "csv.gz",
+            myr_core::actions_engine::ExportFormat::JsonGzip => "json.gz",
+            myr_core::actions_engine::ExportFormat::JsonLines => "jsonl",
+            myr_core::actions_engine::ExportFormat::JsonLinesGzip => "jsonl.gz",
         });
 
         let result = match format {
@@ -1483,6 +1534,35 @@ impl TuiApp {
             }
             myr_core::actions_engine::ExportFormat::Json => {
                 export_rows_to_json(&file_path, &self.result_columns, &rows)
+            }
+            myr_core::actions_engine::ExportFormat::CsvGzip => export_rows_to_csv_with_options(
+                &file_path,
+                &self.result_columns,
+                &rows,
+                ExportCompression::Gzip,
+            ),
+            myr_core::actions_engine::ExportFormat::JsonGzip => export_rows_to_json_with_options(
+                &file_path,
+                &self.result_columns,
+                &rows,
+                JsonExportFormat::Array,
+                ExportCompression::Gzip,
+            ),
+            myr_core::actions_engine::ExportFormat::JsonLines => export_rows_to_json_with_options(
+                &file_path,
+                &self.result_columns,
+                &rows,
+                JsonExportFormat::JsonLines,
+                ExportCompression::None,
+            ),
+            myr_core::actions_engine::ExportFormat::JsonLinesGzip => {
+                export_rows_to_json_with_options(
+                    &file_path,
+                    &self.result_columns,
+                    &rows,
+                    JsonExportFormat::JsonLines,
+                    ExportCompression::Gzip,
+                )
             }
         };
 
@@ -1494,6 +1574,182 @@ impl TuiApp {
                 self.status_line = format!("Export failed: {error}");
             }
         }
+    }
+
+    fn save_current_bookmark(&mut self) {
+        let query_trimmed = self.query_editor_text.trim();
+        if self.selection.table.is_none() && query_trimmed.is_empty() {
+            self.status_line = "Nothing to bookmark yet (select a table or write a query)"
+                .to_string();
+            return;
+        }
+
+        let mut bookmark = SavedBookmark::new(String::new());
+        bookmark.profile_name = self.connected_profile.clone();
+        bookmark.database = self.selection.database.clone();
+        bookmark.table = self.selection.table.clone();
+        bookmark.column = self.selection.column.clone();
+        if !query_trimmed.is_empty() {
+            bookmark.query = Some(self.query_editor_text.clone());
+        }
+
+        let base_name = bookmark_base_name(
+            self.connected_profile.as_deref(),
+            self.selection.database.as_deref(),
+            self.selection.table.as_deref(),
+        );
+
+        let Some(store) = self.bookmark_store.as_mut() else {
+            self.status_line = "Bookmark storage unavailable on this platform".to_string();
+            return;
+        };
+
+        let name = next_bookmark_name(store.bookmarks(), &base_name);
+        bookmark.name = name.clone();
+        store.upsert_bookmark(bookmark);
+
+        match store.persist() {
+            Ok(()) => {
+                self.bookmark_cycle_index = 0;
+                self.status_line = format!(
+                    "Saved bookmark `{name}` ({} total)",
+                    store.bookmarks().len()
+                );
+            }
+            Err(error) => {
+                self.status_line = format!("Bookmark save failed: {error}");
+            }
+        }
+    }
+
+    fn open_next_bookmark(&mut self) {
+        let bookmarks = match self.bookmark_store.as_ref() {
+            Some(store) => store.bookmarks().to_vec(),
+            None => {
+                self.status_line = "Bookmark storage unavailable on this platform".to_string();
+                return;
+            }
+        };
+
+        if bookmarks.is_empty() {
+            self.status_line = "No saved bookmarks found".to_string();
+            return;
+        }
+
+        let index = self.bookmark_cycle_index % bookmarks.len();
+        let bookmark = bookmarks[index].clone();
+        self.bookmark_cycle_index = (index + 1) % bookmarks.len();
+        self.apply_bookmark(bookmark);
+    }
+
+    fn apply_bookmark(&mut self, bookmark: SavedBookmark) {
+        if let Some(database) = bookmark.database.as_deref() {
+            if let Some(index) = self
+                .schema_databases
+                .iter()
+                .position(|candidate| candidate == database)
+            {
+                self.selected_database_index = index;
+            }
+            self.active_database = Some(database.to_string());
+            self.selection.database = Some(database.to_string());
+            self.reload_tables_for_active_database();
+        }
+
+        if let Some(table) = bookmark.table.as_deref() {
+            if let Some(index) = self.schema_tables.iter().position(|candidate| candidate == table) {
+                self.selected_table_index = index;
+            }
+            self.selection.table = Some(table.to_string());
+            self.reload_columns_for_selected_table();
+        }
+
+        if let Some(column) = bookmark.column.as_deref() {
+            if let Some(index) = self
+                .schema_columns
+                .iter()
+                .position(|candidate| candidate == column)
+            {
+                self.selected_column_index = index;
+            }
+            self.selection.column = Some(column.to_string());
+        }
+
+        if let Some(query) = bookmark.query.as_deref().filter(|query| !query.trim().is_empty()) {
+            self.query_editor_text = query.to_string();
+            self.query_cursor = self.query_editor_text.len();
+            self.query_history_index = None;
+            self.query_history_draft = None;
+            self.set_active_pane(Pane::QueryEditor);
+        } else {
+            self.set_query_editor_to_selected_table();
+            self.set_active_pane(Pane::SchemaExplorer);
+        }
+
+        self.clear_pagination_state();
+        self.status_line = format!("Opened bookmark `{}`", bookmark.name);
+    }
+
+    fn jump_to_next_related_table(&mut self) {
+        if self.schema_relationships.is_empty() {
+            self.status_line = "No related tables discovered for the current selection".to_string();
+            return;
+        }
+
+        let index = self
+            .selected_relationship_index
+            .min(self.schema_relationships.len().saturating_sub(1));
+        let relationship = self.schema_relationships[index].clone();
+        self.selected_relationship_index = (index + 1) % self.schema_relationships.len();
+
+        if let Some(database_index) = self
+            .schema_databases
+            .iter()
+            .position(|candidate| candidate == &relationship.related_database)
+        {
+            self.selected_database_index = database_index;
+        }
+        self.active_database = Some(relationship.related_database.clone());
+        self.selection.database = Some(relationship.related_database.clone());
+        self.reload_tables_for_active_database();
+
+        if let Some(table_index) = self
+            .schema_tables
+            .iter()
+            .position(|candidate| candidate == &relationship.related_table)
+        {
+            self.selected_table_index = table_index;
+        }
+        self.selection.table = Some(relationship.related_table.clone());
+        self.reload_columns_for_selected_table();
+
+        if let Some(column_index) = self
+            .schema_columns
+            .iter()
+            .position(|candidate| candidate == &relationship.related_column)
+        {
+            self.selected_column_index = column_index;
+        }
+        self.selection.column = Some(relationship.related_column.clone());
+        self.clear_pagination_state();
+        self.set_query_editor_to_selected_table();
+        self.set_active_pane(Pane::SchemaExplorer);
+
+        let direction = relationship_direction_label(relationship.direction);
+        self.status_line = format!(
+            "Jumped {direction} `{}`.`{}` via {} ({} -> {})",
+            relationship.related_database,
+            relationship.related_table,
+            relationship.constraint_name,
+            relationship.source_column,
+            relationship.related_column
+        );
+    }
+
+    fn has_saved_bookmarks(&self) -> bool {
+        self.bookmark_store
+            .as_ref()
+            .is_some_and(|store| !store.bookmarks().is_empty())
     }
 
     fn palette_entries(&self) -> Vec<ActionId> {
@@ -2193,6 +2449,15 @@ impl TuiApp {
             ActionInvocation::ExportResults(format) => {
                 self.export_results(format);
             }
+            ActionInvocation::SaveBookmark => {
+                self.save_current_bookmark();
+            }
+            ActionInvocation::OpenBookmark => {
+                self.open_next_bookmark();
+            }
+            ActionInvocation::JumpToRelatedTable => {
+                self.jump_to_next_related_table();
+            }
             ActionInvocation::CopyToClipboard(target) => {
                 self.status_line = format!("Copy requested: {target:?}");
             }
@@ -2234,6 +2499,8 @@ impl TuiApp {
             query_text,
             query_running: self.query_running,
             has_results: self.has_results,
+            has_related_tables: !self.schema_relationships.is_empty(),
+            has_saved_bookmarks: self.has_saved_bookmarks(),
             pagination_enabled,
             can_page_next,
             can_page_previous,
@@ -2731,6 +2998,31 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             if app.schema_columns.is_empty() {
                 lines.push(Line::from("  (none)"));
             }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "Relationships (use action `Jump to related table` to follow):",
+            ));
+            if app.schema_relationships.is_empty() {
+                lines.push(Line::from("  (none detected)"));
+            } else {
+                for (index, relationship) in app.schema_relationships.iter().enumerate() {
+                    let marker = if index == app.selected_relationship_index {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    let direction = relationship_direction_label(relationship.direction);
+                    lines.push(Line::from(format!(
+                        "{marker} {direction} {}.{} ({}, {} -> {})",
+                        relationship.related_database,
+                        relationship.related_table,
+                        relationship.constraint_name,
+                        relationship.source_column,
+                        relationship.related_column
+                    )));
+                }
+            }
             lines
         }
         Pane::Results => {
@@ -2885,6 +3177,7 @@ fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("F2: toggle perf overlay"),
         Line::from("F3: toggle safe mode"),
         Line::from("Ctrl+P: command palette"),
+        Line::from("Palette actions include bookmark save/open + related-table jumps"),
         Line::from("Ctrl+U: clear current input"),
         Line::from("Ctrl+C: cancel query (or request exit if idle)"),
         Line::from("Arrows (or Alt+h/j/k/l): navigation"),
@@ -3027,6 +3320,122 @@ fn connection_badge_and_marker(connection_state: &str, tick: usize) -> (&'static
     }
 }
 
+fn relationship_direction_label(direction: RelationshipDirection) -> &'static str {
+    match direction {
+        RelationshipDirection::Outbound => "->",
+        RelationshipDirection::Inbound => "<-",
+    }
+}
+
+fn demo_relationships(database: Option<&str>, table: Option<&str>) -> Vec<TableRelationship> {
+    let db = database.unwrap_or("app");
+    match table.unwrap_or_default() {
+        "users" => vec![
+            TableRelationship {
+                direction: RelationshipDirection::Inbound,
+                constraint_name: "fk_sessions_users".to_string(),
+                source_column: "id".to_string(),
+                related_database: db.to_string(),
+                related_table: "sessions".to_string(),
+                related_column: "user_id".to_string(),
+            },
+            TableRelationship {
+                direction: RelationshipDirection::Inbound,
+                constraint_name: "fk_playlists_users".to_string(),
+                source_column: "id".to_string(),
+                related_database: db.to_string(),
+                related_table: "playlists".to_string(),
+                related_column: "user_id".to_string(),
+            },
+            TableRelationship {
+                direction: RelationshipDirection::Inbound,
+                constraint_name: "fk_events_users".to_string(),
+                source_column: "id".to_string(),
+                related_database: db.to_string(),
+                related_table: "events".to_string(),
+                related_column: "user_id".to_string(),
+            },
+        ],
+        "sessions" => vec![TableRelationship {
+            direction: RelationshipDirection::Outbound,
+            constraint_name: "fk_sessions_users".to_string(),
+            source_column: "user_id".to_string(),
+            related_database: db.to_string(),
+            related_table: "users".to_string(),
+            related_column: "id".to_string(),
+        }],
+        "playlists" => vec![TableRelationship {
+            direction: RelationshipDirection::Outbound,
+            constraint_name: "fk_playlists_users".to_string(),
+            source_column: "user_id".to_string(),
+            related_database: db.to_string(),
+            related_table: "users".to_string(),
+            related_column: "id".to_string(),
+        }],
+        "events" => vec![TableRelationship {
+            direction: RelationshipDirection::Outbound,
+            constraint_name: "fk_events_users".to_string(),
+            source_column: "user_id".to_string(),
+            related_database: db.to_string(),
+            related_table: "users".to_string(),
+            related_column: "id".to_string(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn bookmark_base_name(profile: Option<&str>, database: Option<&str>, table: Option<&str>) -> String {
+    let profile_part = profile
+        .map(sanitize_bookmark_segment)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    let database_part = database
+        .map(sanitize_bookmark_segment)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "db".to_string());
+    let table_part = table
+        .map(sanitize_bookmark_segment)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "query".to_string());
+    format!("{profile_part}:{database_part}.{table_part}")
+}
+
+fn sanitize_bookmark_segment(value: &str) -> String {
+    let mut normalized = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            normalized.push(ch);
+        } else {
+            normalized.push('_');
+        }
+        if normalized.len() >= BOOKMARK_NAME_MAX_CHARS {
+            break;
+        }
+    }
+    normalized.trim_matches('_').to_string()
+}
+
+fn next_bookmark_name(bookmarks: &[SavedBookmark], base_name: &str) -> String {
+    if bookmarks
+        .iter()
+        .all(|bookmark| bookmark.name.as_str() != base_name)
+    {
+        return base_name.to_string();
+    }
+
+    for suffix in 2..10_000 {
+        let candidate = format!("{base_name}-{suffix}");
+        if bookmarks
+            .iter()
+            .all(|bookmark| bookmark.name.as_str() != candidate)
+        {
+            return candidate;
+        }
+    }
+
+    format!("{base_name}-{}", unix_timestamp_millis())
+}
+
 fn parse_password_source(value: &str) -> Option<PasswordSource> {
     match value.trim().to_ascii_lowercase().as_str() {
         "env" | "env_var" | "envvar" | "environment" | "" => Some(PasswordSource::EnvVar),
@@ -3079,6 +3488,16 @@ fn default_audit_trail() -> Option<FileAuditTrail> {
 #[cfg(not(test))]
 fn default_audit_trail() -> Option<FileAuditTrail> {
     FileAuditTrail::load_default().ok()
+}
+
+#[cfg(test)]
+fn default_bookmark_store() -> Option<FileBookmarksStore> {
+    None
+}
+
+#[cfg(not(test))]
+fn default_bookmark_store() -> Option<FileBookmarksStore> {
+    FileBookmarksStore::load_default().ok()
 }
 
 fn previous_char_boundary(text: &str, index: usize) -> usize {
@@ -3370,17 +3789,20 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use myr_core::actions_engine::CopyTarget;
+    use myr_core::bookmarks::{FileBookmarksStore, SavedBookmark};
     use myr_core::profiles::{ConnectionProfile, PasswordSource, TlsMode};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use tempfile::TempDir;
 
     use super::{
-        candidate_key_column, centered_rect, connection_badge_and_marker, extract_key_bounds,
-        is_connection_lost_error, is_transient_query_error, map_key_event, parse_password_source,
-        parse_read_only_flag, parse_tls_mode, quote_identifier, render, suggest_limit_in_editor,
-        ActionId, ActionInvocation, AppView, ConnectIntent, DirectionKey, ErrorKind, Msg,
-        MysqlDataBackend, PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer,
-        SchemaLane, TuiApp, WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
+        bookmark_base_name, candidate_key_column, centered_rect, connection_badge_and_marker,
+        extract_key_bounds, is_connection_lost_error, is_transient_query_error,
+        map_key_event, next_bookmark_name, parse_password_source, parse_read_only_flag,
+        parse_tls_mode, quote_identifier, render, suggest_limit_in_editor, ActionId,
+        ActionInvocation, AppView, ConnectIntent, DirectionKey, ErrorKind, Msg, MysqlDataBackend,
+        PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer, SchemaLane, TuiApp,
+        WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
     };
 
     fn app_in_pane(pane: Pane) -> TuiApp {
@@ -3388,6 +3810,15 @@ mod tests {
             pane,
             ..TuiApp::default()
         }
+    }
+
+    fn app_with_bookmark_store(pane: Pane, temp_dir: &TempDir) -> TuiApp {
+        let path = temp_dir.path().join("bookmarks.toml");
+        let mut app = app_in_pane(pane);
+        app.bookmark_store = Some(
+            FileBookmarksStore::load_from_path(path).expect("failed to load test bookmark store"),
+        );
+        app
     }
 
     fn drive_demo_query_to_completion(app: &mut TuiApp) {
@@ -3695,6 +4126,74 @@ mod tests {
     }
 
     #[test]
+    fn demo_relationships_are_loaded_for_selected_table() {
+        let mut app = app_in_pane(Pane::SchemaExplorer);
+        app.selection.database = Some("app".to_string());
+        app.selection.table = Some("users".to_string());
+        app.reload_columns_for_selected_table();
+
+        assert!(!app.schema_relationships.is_empty());
+        assert_eq!(
+            app.schema_relationships[0].constraint_name,
+            "fk_sessions_users"
+        );
+    }
+
+    #[test]
+    fn jump_related_table_updates_schema_selection() {
+        let mut app = app_in_pane(Pane::SchemaExplorer);
+        app.selection.database = Some("app".to_string());
+        app.selection.table = Some("users".to_string());
+        app.reload_columns_for_selected_table();
+
+        app.jump_to_next_related_table();
+
+        assert_eq!(app.selection.table.as_deref(), Some("sessions"));
+        assert_eq!(app.selection.column.as_deref(), Some("user_id"));
+        assert!(app.status_line.contains("fk_sessions_users"));
+    }
+
+    #[test]
+    fn bookmark_name_helpers_are_stable() {
+        let base = bookmark_base_name(Some("local-dev"), Some("myr bench"), Some("events"));
+        assert_eq!(base, "local-dev:myr_bench.events");
+
+        let bookmarks = vec![
+            SavedBookmark::new("local-dev:myr_bench.events"),
+            SavedBookmark::new("local-dev:myr_bench.events-2"),
+        ];
+        assert_eq!(
+            next_bookmark_name(&bookmarks, "local-dev:myr_bench.events"),
+            "local-dev:myr_bench.events-3"
+        );
+    }
+
+    #[test]
+    fn save_and_open_bookmark_paths_round_trip() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let mut app = app_with_bookmark_store(Pane::QueryEditor, &temp_dir);
+        app.connected_profile = Some("local-dev".to_string());
+        app.selection.database = Some("app".to_string());
+        app.selection.table = Some("events".to_string());
+        app.selection.column = Some("user_id".to_string());
+        app.query_editor_text = "SELECT user_id FROM `app`.`events` LIMIT 5".to_string();
+
+        app.save_current_bookmark();
+        assert!(app.status_line.starts_with("Saved bookmark"));
+        assert!(app.has_saved_bookmarks());
+
+        app.query_editor_text = "SELECT 1".to_string();
+        app.selection.table = Some("users".to_string());
+
+        app.open_next_bookmark();
+        assert_eq!(app.pane, Pane::QueryEditor);
+        assert_eq!(app.selection.table.as_deref(), Some("events"));
+        assert_eq!(app.selection.column.as_deref(), Some("user_id"));
+        assert_eq!(app.query_editor_text, "SELECT user_id FROM `app`.`events` LIMIT 5");
+        assert!(app.status_line.starts_with("Opened bookmark"));
+    }
+
+    #[test]
     fn key_column_candidate_prefers_id_then_suffix() {
         let columns = vec![
             "created_at".to_string(),
@@ -3976,6 +4475,18 @@ mod tests {
 
         app.export_results(myr_core::actions_engine::ExportFormat::Json);
         assert!(app.status_line.starts_with("Exported "));
+
+        app.export_results(myr_core::actions_engine::ExportFormat::CsvGzip);
+        assert!(app.status_line.starts_with("Exported "));
+
+        app.export_results(myr_core::actions_engine::ExportFormat::JsonGzip);
+        assert!(app.status_line.starts_with("Exported "));
+
+        app.export_results(myr_core::actions_engine::ExportFormat::JsonLines);
+        assert!(app.status_line.starts_with("Exported "));
+
+        app.export_results(myr_core::actions_engine::ExportFormat::JsonLinesGzip);
+        assert!(app.status_line.starts_with("Exported "));
     }
 
     #[test]
@@ -4059,6 +4570,35 @@ mod tests {
             "unexpected search status: {}",
             app.status_line
         );
+    }
+
+    #[test]
+    fn apply_invocation_handles_bookmark_and_relationship_actions() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let mut app = app_with_bookmark_store(Pane::QueryEditor, &temp_dir);
+        app.selection.database = Some("app".to_string());
+        app.selection.table = Some("users".to_string());
+        app.selection.column = Some("id".to_string());
+        app.query_editor_text = "SELECT * FROM `app`.`users` LIMIT 5".to_string();
+
+        app.apply_invocation(ActionId::SaveBookmark, ActionInvocation::SaveBookmark);
+        assert!(app.status_line.starts_with("Saved bookmark"));
+
+        app.selection.table = Some("events".to_string());
+        app.query_editor_text = "SELECT 1".to_string();
+        app.apply_invocation(ActionId::OpenBookmark, ActionInvocation::OpenBookmark);
+        assert_eq!(app.selection.table.as_deref(), Some("users"));
+        assert!(app.status_line.starts_with("Opened bookmark"));
+
+        app.pane = Pane::SchemaExplorer;
+        app.selection.table = Some("users".to_string());
+        app.reload_columns_for_selected_table();
+        app.apply_invocation(
+            ActionId::JumpToRelatedTable,
+            ActionInvocation::JumpToRelatedTable,
+        );
+        assert_eq!(app.selection.table.as_deref(), Some("sessions"));
+        assert!(app.status_line.contains("Jumped"));
     }
 
     #[test]

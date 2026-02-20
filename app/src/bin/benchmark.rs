@@ -1,10 +1,12 @@
 use std::io;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use myr_adapters::mysql::{MysqlConnectionBackend, MysqlDataBackend};
 use myr_core::connection_manager::ConnectionManager;
 use myr_core::profiles::ConnectionProfile;
 use myr_core::query_runner::{QueryBackend, QueryRowStream};
+use serde_json::json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParseOutcome {
@@ -23,6 +25,8 @@ struct BenchmarkConfig {
     seed_rows: u64,
     assert_first_row_ms: Option<f64>,
     assert_min_rows_per_sec: Option<f64>,
+    metrics_output: Option<String>,
+    metrics_label: Option<String>,
 }
 
 impl Default for BenchmarkConfig {
@@ -38,6 +42,8 @@ impl Default for BenchmarkConfig {
             seed_rows: 0,
             assert_first_row_ms: None,
             assert_min_rows_per_sec: None,
+            metrics_output: None,
+            metrics_label: None,
         }
     }
 }
@@ -92,6 +98,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("metric.peak_memory_bytes={bytes}");
     } else {
         println!("metric.peak_memory_bytes=n/a");
+    }
+    if let Some(path) = config.metrics_output.as_deref() {
+        write_metrics_file(
+            path,
+            &config,
+            connect_latency.as_secs_f64() * 1_000.0,
+            first_row_ms,
+            elapsed_ms,
+            metrics.rows_streamed,
+            rows_per_sec,
+            peak_memory_bytes_best_effort(),
+        )?;
+        println!("metric.output_file={path}");
     }
 
     enforce_assertions(&config, first_row_ms, rows_per_sec)?;
@@ -224,6 +243,52 @@ fn enforce_assertions(
     Ok(())
 }
 
+fn write_metrics_file(
+    path: &str,
+    config: &BenchmarkConfig,
+    connect_ms: f64,
+    first_row_ms: f64,
+    elapsed_ms: f64,
+    rows_streamed: u64,
+    rows_per_sec: f64,
+    peak_memory_bytes: Option<u64>,
+) -> io::Result<()> {
+    let path_ref = Path::new(path);
+    if let Some(parent) = path_ref.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let started_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+
+    let payload = json!({
+        "label": config.metrics_label.clone().unwrap_or_else(|| "benchmark".to_string()),
+        "started_unix_ms": started_unix_ms,
+        "profile_name": config.profile_name,
+        "host": config.host,
+        "port": config.port,
+        "database": config.database,
+        "sql": config.sql,
+        "seed_rows": config.seed_rows,
+        "metrics": {
+            "connect_ms": connect_ms,
+            "first_row_ms": first_row_ms,
+            "stream_elapsed_ms": elapsed_ms,
+            "rows_streamed": rows_streamed,
+            "rows_per_sec": rows_per_sec,
+            "peak_memory_bytes": peak_memory_bytes,
+        }
+    });
+
+    let rendered = serde_json::to_string_pretty(&payload).map_err(io_other)?;
+    std::fs::write(path_ref, rendered).map_err(io_other)
+}
+
 #[cfg(target_os = "linux")]
 fn peak_memory_bytes_best_effort() -> Option<u64> {
     let contents = std::fs::read_to_string("/proc/self/status").ok()?;
@@ -289,6 +354,12 @@ fn parse_args_from(
                         })?,
                 );
             }
+            "--metrics-output" => {
+                config.metrics_output = Some(next_value(&mut args, "--metrics-output")?);
+            }
+            "--metrics-label" => {
+                config.metrics_label = Some(next_value(&mut args, "--metrics-label")?);
+            }
             _ => {
                 return Err(io_other(format!("unknown argument `{flag}`")));
             }
@@ -307,7 +378,7 @@ fn print_help() {
     println!(
         "myr benchmark runner\n\n\
 Usage:\n  cargo run -p myr-app --bin benchmark -- [OPTIONS]\n\n\
-Options:\n  --profile-name <name>           Profile name used for connection manager (default: bench-local)\n  --host <host>                   MySQL host (default: 127.0.0.1)\n  --port <port>                   MySQL port (default: 3306)\n  --user <user>                   MySQL user (default: root)\n  --database <name>               Database name (default: myr_bench)\n  --sql <query>                   Query to benchmark\n  --seed-rows <count>             Seed `events` table up to count rows before benchmark\n  --assert-first-row-ms <ms>      Fail if first-row latency exceeds threshold\n  --assert-min-rows-per-sec <rps> Fail if throughput is below threshold\n\n\
+Options:\n  --profile-name <name>           Profile name used for connection manager (default: bench-local)\n  --host <host>                   MySQL host (default: 127.0.0.1)\n  --port <port>                   MySQL port (default: 3306)\n  --user <user>                   MySQL user (default: root)\n  --database <name>               Database name (default: myr_bench)\n  --sql <query>                   Query to benchmark\n  --seed-rows <count>             Seed `events` table up to count rows before benchmark\n  --assert-first-row-ms <ms>      Fail if first-row latency exceeds threshold\n  --assert-min-rows-per-sec <rps> Fail if throughput is below threshold\n  --metrics-output <path>         Write machine-readable benchmark JSON\n  --metrics-label <label>         Optional label stored in metrics output\n\n\
 Environment:\n  MYR_DB_PASSWORD is used for authentication.\n"
     );
 }
@@ -323,8 +394,8 @@ mod tests {
 
     use super::{
         build_insert_batch_sql, enforce_assertions, ensure_seed_data, execute_sql, io_other,
-        next_value, parse_args_from, query_scalar_u64, run_query_benchmark, BenchmarkConfig,
-        ParseOutcome,
+        next_value, parse_args_from, query_scalar_u64, run_query_benchmark, write_metrics_file,
+        BenchmarkConfig, ParseOutcome,
     };
 
     fn mysql_integration_enabled() -> bool {
@@ -371,6 +442,10 @@ mod tests {
                 "1500".to_string(),
                 "--assert-min-rows-per-sec".to_string(),
                 "4000".to_string(),
+                "--metrics-output".to_string(),
+                "target/perf/bench.json".to_string(),
+                "--metrics-label".to_string(),
+                "ci-main".to_string(),
             ],
             &mut config,
         )
@@ -386,6 +461,11 @@ mod tests {
         assert_eq!(config.seed_rows, 12345);
         assert_eq!(config.assert_first_row_ms, Some(1500.0));
         assert_eq!(config.assert_min_rows_per_sec, Some(4000.0));
+        assert_eq!(
+            config.metrics_output.as_deref(),
+            Some("target/perf/bench.json")
+        );
+        assert_eq!(config.metrics_label.as_deref(), Some("ci-main"));
     }
 
     #[test]
@@ -442,6 +522,34 @@ mod tests {
     fn io_other_uses_display_text() {
         let err = io_other("boom");
         assert_eq!(err.to_string(), "boom");
+    }
+
+    #[test]
+    fn metrics_writer_emits_json_payload() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let output_path = temp_dir.path().join("bench.json");
+        let config = BenchmarkConfig {
+            metrics_label: Some("ci-smoke".to_string()),
+            ..BenchmarkConfig::default()
+        };
+
+        write_metrics_file(
+            output_path.to_string_lossy().as_ref(),
+            &config,
+            10.0,
+            20.0,
+            30.0,
+            42,
+            2_000.0,
+            Some(123_456),
+        )
+        .expect("write metrics");
+
+        let raw = std::fs::read_to_string(output_path).expect("read metrics file");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse metrics json");
+        assert_eq!(parsed["label"], "ci-smoke");
+        assert_eq!(parsed["metrics"]["rows_streamed"], 42);
+        assert_eq!(parsed["metrics"]["rows_per_sec"], 2_000.0);
     }
 
     #[tokio::test(flavor = "current_thread")]

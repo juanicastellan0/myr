@@ -197,6 +197,37 @@ Expected:
 - Action runs `EXPLAIN <query>` instead of replacing editor text.
 - Results pane displays the MySQL execution plan rows.
 
+## Foreign-key Relationship Jump
+
+Steps:
+
+1. Go to Schema Explorer and select a table with known relationships (for seeded data, `users`/`events`).
+2. Confirm the `Relationships` subsection shows related table entries.
+3. Invoke `Jump to related table` from command palette (`Ctrl+P`) or its ranked footer slot.
+4. Invoke the same action again to continue cycling relationships.
+
+Expected:
+
+- Selection jumps to the related database/table/column target.
+- Query editor text updates to the newly selected table.
+- Status line reports the relationship constraint used for the jump.
+
+## Saved Bookmarks
+
+Steps:
+
+1. Select a schema target and place a query in Query Editor.
+2. Invoke `Save bookmark` from command palette.
+3. Change selection/query to something else.
+4. Invoke `Open bookmark` to load a saved entry.
+5. Repeat `Open bookmark` to cycle additional saved entries.
+
+Expected:
+
+- Bookmark save reports a generated bookmark name and total count.
+- Open restores database/table/column selection and query text.
+- Bookmarks persist to `~/.config/myr/bookmarks.toml` (or `$MYR_CONFIG_DIR/myr/bookmarks.toml`).
+
 ## Results Search Mode
 
 Steps:
@@ -204,12 +235,37 @@ Steps:
 1. Run any query that returns rows.
 2. Trigger search action (`Ctrl+P` -> `Search results` or action slot key shown in footer).
 3. Enter a search term and press `Enter`.
-4. Press `n` / `N` to cycle forward/backward matches.
+4. Press `Enter` to jump to the next match (or `Esc` to exit search mode).
 
 Expected:
 
 - Status line shows match count and active match index.
 - Result cursor jumps between matched rows.
+
+## Extended Export Formats
+
+Steps:
+
+1. Run any query that returns rows.
+2. Invoke each export action from command palette:
+   - `Export CSV`
+   - `Export JSON`
+   - `Export CSV (gzip)`
+   - `Export JSON (gzip)`
+   - `Export JSONL`
+   - `Export JSONL (gzip)`
+3. For gzip outputs, validate file contents with:
+
+```bash
+gzip -dc /tmp/myr-export-*.csv.gz | head
+gzip -dc /tmp/myr-export-*.jsonl.gz | head
+```
+
+Expected:
+
+- Each action reports successful export with output path.
+- Gzip files decompress correctly.
+- JSONL exports contain one JSON object per line.
 
 ## SQL Audit Trail
 
@@ -308,4 +364,18 @@ MYR_TEST_DB_PORT=33306 \
 MYR_TEST_DB_USER=root \
 MYR_TEST_DB_DATABASE=myr_bench \
 cargo test -p myr-tui mysql_query_path_streams_rows_when_enabled -- --nocapture
+```
+
+Perf metrics output (for trend artifacts / local tracking):
+
+```bash
+MYR_DB_PASSWORD=root \
+cargo run -p myr-app --bin benchmark -- \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench \
+  --seed-rows 10000 \
+  --metrics-label local-smoke \
+  --metrics-output target/perf/local-smoke.json
 ```

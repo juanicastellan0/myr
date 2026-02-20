@@ -907,6 +907,7 @@ name = "myr-adapters"
 version = "0.1.1"
 dependencies = [
  "async-trait",
+ "flate2",
  "futures-util",
  "keyring",
  "myr-core",
@@ -924,6 +925,8 @@ dependencies = [
  "myr-adapters",
  "myr-core",
  "myr-tui",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -948,6 +951,7 @@ dependencies = [
  "myr-adapters",
  "myr-core",
  "ratatui",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]

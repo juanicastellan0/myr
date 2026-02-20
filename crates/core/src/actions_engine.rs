@@ -13,6 +13,7 @@ const MAX_RECENCY_BOOST: i32 = 25;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ActionId {
     PreviewTable,
+    JumpToRelatedTable,
     PreviousPage,
     NextPage,
     DescribeTable,
@@ -28,6 +29,12 @@ pub enum ActionId {
     CancelRunningQuery,
     ExportCsv,
     ExportJson,
+    ExportCsvGzip,
+    ExportJsonGzip,
+    ExportJsonLines,
+    ExportJsonLinesGzip,
+    SaveBookmark,
+    OpenBookmark,
     CopyCell,
     CopyRow,
     SearchResults,
@@ -57,6 +64,8 @@ pub struct ActionContext {
     pub query_text: Option<String>,
     pub query_running: bool,
     pub has_results: bool,
+    pub has_related_tables: bool,
+    pub has_saved_bookmarks: bool,
     pub pagination_enabled: bool,
     pub can_page_next: bool,
     pub can_page_previous: bool,
@@ -70,6 +79,8 @@ impl Default for ActionContext {
             query_text: None,
             query_running: false,
             has_results: false,
+            has_related_tables: false,
+            has_saved_bookmarks: false,
             pagination_enabled: false,
             can_page_next: false,
             can_page_previous: false,
@@ -98,11 +109,16 @@ pub struct ActionDefinition {
     pub description: &'static str,
 }
 
-const ACTIONS: [ActionDefinition; 20] = [
+const ACTIONS: [ActionDefinition; 27] = [
     ActionDefinition {
         id: ActionId::PreviewTable,
         title: "Preview table",
         description: "Run SELECT * with a safe preview LIMIT",
+    },
+    ActionDefinition {
+        id: ActionId::JumpToRelatedTable,
+        title: "Jump to related table",
+        description: "Follow a foreign-key relationship to another table",
     },
     ActionDefinition {
         id: ActionId::PreviousPage,
@@ -180,6 +196,36 @@ const ACTIONS: [ActionDefinition; 20] = [
         description: "Export current results to JSON",
     },
     ActionDefinition {
+        id: ActionId::ExportCsvGzip,
+        title: "Export CSV (gzip)",
+        description: "Export current results to compressed CSV",
+    },
+    ActionDefinition {
+        id: ActionId::ExportJsonGzip,
+        title: "Export JSON (gzip)",
+        description: "Export current results to compressed JSON",
+    },
+    ActionDefinition {
+        id: ActionId::ExportJsonLines,
+        title: "Export JSONL",
+        description: "Export current results as newline-delimited JSON",
+    },
+    ActionDefinition {
+        id: ActionId::ExportJsonLinesGzip,
+        title: "Export JSONL (gzip)",
+        description: "Export current results as compressed newline-delimited JSON",
+    },
+    ActionDefinition {
+        id: ActionId::SaveBookmark,
+        title: "Save bookmark",
+        description: "Save current schema target and query as a bookmark",
+    },
+    ActionDefinition {
+        id: ActionId::OpenBookmark,
+        title: "Open bookmark",
+        description: "Open the next saved bookmark",
+    },
+    ActionDefinition {
         id: ActionId::CopyCell,
         title: "Copy cell",
         description: "Copy selected cell value",
@@ -239,6 +285,10 @@ pub struct RankedAction {
 pub enum ExportFormat {
     Csv,
     Json,
+    CsvGzip,
+    JsonGzip,
+    JsonLines,
+    JsonLinesGzip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +307,9 @@ pub enum ActionInvocation {
     CancelQuery,
     ExportResults(ExportFormat),
     CopyToClipboard(CopyTarget),
+    SaveBookmark,
+    OpenBookmark,
+    JumpToRelatedTable,
     OpenView(AppView),
     SearchBufferedResults,
 }
@@ -338,6 +391,7 @@ impl ActionsEngine {
                 let target = context_selected_target(context)?;
                 ActionInvocation::RunSql(preview_select_sql(&target, PREVIEW_LIMIT))
             }
+            ActionId::JumpToRelatedTable => ActionInvocation::JumpToRelatedTable,
             ActionId::PreviousPage => ActionInvocation::PaginatePrevious,
             ActionId::NextPage => ActionInvocation::PaginateNext,
             ActionId::DescribeTable => {
@@ -401,6 +455,14 @@ impl ActionsEngine {
             ActionId::CancelRunningQuery => ActionInvocation::CancelQuery,
             ActionId::ExportCsv => ActionInvocation::ExportResults(ExportFormat::Csv),
             ActionId::ExportJson => ActionInvocation::ExportResults(ExportFormat::Json),
+            ActionId::ExportCsvGzip => ActionInvocation::ExportResults(ExportFormat::CsvGzip),
+            ActionId::ExportJsonGzip => ActionInvocation::ExportResults(ExportFormat::JsonGzip),
+            ActionId::ExportJsonLines => ActionInvocation::ExportResults(ExportFormat::JsonLines),
+            ActionId::ExportJsonLinesGzip => {
+                ActionInvocation::ExportResults(ExportFormat::JsonLinesGzip)
+            }
+            ActionId::SaveBookmark => ActionInvocation::SaveBookmark,
+            ActionId::OpenBookmark => ActionInvocation::OpenBookmark,
             ActionId::CopyCell => ActionInvocation::CopyToClipboard(CopyTarget::Cell),
             ActionId::CopyRow => ActionInvocation::CopyToClipboard(CopyTarget::Row),
             ActionId::SearchResults => ActionInvocation::SearchBufferedResults,
@@ -450,8 +512,7 @@ fn context_selected_column(context: &ActionContext) -> Result<&str, ActionEngine
 
 fn action_enabled(action_id: ActionId, context: &ActionContext) -> bool {
     match action_id {
-        ActionId::PreviewTable
-        | ActionId::DescribeTable
+        ActionId::PreviewTable | ActionId::DescribeTable
         | ActionId::ShowIndexes
         | ActionId::ShowCreateTable => {
             context.view == AppView::SchemaExplorer
@@ -504,9 +565,28 @@ fn action_enabled(action_id: ActionId, context: &ActionContext) -> bool {
         ActionId::CancelRunningQuery => context.query_running,
         ActionId::ExportCsv
         | ActionId::ExportJson
+        | ActionId::ExportCsvGzip
+        | ActionId::ExportJsonGzip
+        | ActionId::ExportJsonLines
+        | ActionId::ExportJsonLinesGzip
         | ActionId::CopyRow
         | ActionId::SearchResults => context.has_results,
+        ActionId::SaveBookmark => {
+            !context.query_running
+                && (context.selection.table.is_some()
+                    || context
+                        .query_text
+                        .as_deref()
+                        .is_some_and(|query| !query.trim().is_empty()))
+        }
+        ActionId::OpenBookmark => !context.query_running && context.has_saved_bookmarks,
         ActionId::CopyCell => context.has_results && context.selection.column.is_some(),
+        ActionId::JumpToRelatedTable => {
+            context.has_related_tables
+                && context.selection.table.is_some()
+                && context.selection.database.is_some()
+                && !context.query_running
+        }
         ActionId::FocusQueryEditor => context.view != AppView::QueryEditor,
     }
 }
@@ -573,6 +653,16 @@ fn action_base_score(action_id: ActionId, context: &ActionContext) -> i32 {
                 0
             }
         }
+        ActionId::JumpToRelatedTable => {
+            if context.view == AppView::SchemaExplorer
+                && context.selection.table.is_some()
+                && context.has_related_tables
+            {
+                870
+            } else {
+                0
+            }
+        }
         ActionId::PreviousPage => {
             if context.pagination_enabled
                 && context.can_page_previous
@@ -633,9 +723,63 @@ fn action_base_score(action_id: ActionId, context: &ActionContext) -> i32 {
                 0
             }
         }
-        ActionId::ExportCsv | ActionId::ExportJson => {
+        ActionId::ExportCsv => {
             if context.has_results {
                 640
+            } else {
+                0
+            }
+        }
+        ActionId::ExportJson => {
+            if context.has_results {
+                638
+            } else {
+                0
+            }
+        }
+        ActionId::ExportCsvGzip => {
+            if context.has_results {
+                636
+            } else {
+                0
+            }
+        }
+        ActionId::ExportJsonGzip => {
+            if context.has_results {
+                634
+            } else {
+                0
+            }
+        }
+        ActionId::ExportJsonLines => {
+            if context.has_results {
+                632
+            } else {
+                0
+            }
+        }
+        ActionId::ExportJsonLinesGzip => {
+            if context.has_results {
+                630
+            } else {
+                0
+            }
+        }
+        ActionId::SaveBookmark => {
+            if context.selection.table.is_some()
+                || context
+                    .query_text
+                    .as_deref()
+                    .is_some_and(|query| !query.trim().is_empty())
+            {
+                620
+            } else {
+                0
+            }
+        }
+        ActionId::OpenBookmark => {
+            if context.has_saved_bookmarks {
+                610
             } else {
                 0
             }
@@ -772,6 +916,8 @@ mod tests {
             query_text: None,
             query_running: false,
             has_results: false,
+            has_related_tables: false,
+            has_saved_bookmarks: false,
             pagination_enabled: false,
             can_page_next: false,
             can_page_previous: false,
@@ -887,6 +1033,8 @@ mod tests {
             query_text: None,
             query_running: false,
             has_results: false,
+            has_related_tables: false,
+            has_saved_bookmarks: false,
             pagination_enabled: false,
             can_page_next: false,
             can_page_previous: false,
@@ -939,6 +1087,8 @@ mod tests {
             query_text: Some("SELECT * FROM `app`.`events` LIMIT 200".to_string()),
             query_running: false,
             has_results: true,
+            has_related_tables: false,
+            has_saved_bookmarks: false,
             pagination_enabled: true,
             can_page_next: true,
             can_page_previous: true,
@@ -953,5 +1103,87 @@ mod tests {
             .invoke(ActionId::PreviousPage, &context)
             .expect("previous page should be enabled");
         assert_eq!(previous, ActionInvocation::PaginatePrevious);
+    }
+
+    #[test]
+    fn relationship_and_bookmark_actions_are_invokable_with_context_flags() {
+        let mut engine = ActionsEngine::new();
+        let context = ActionContext {
+            view: AppView::SchemaExplorer,
+            selection: SchemaSelection {
+                database: Some("app".to_string()),
+                table: Some("sessions".to_string()),
+                column: Some("user_id".to_string()),
+            },
+            query_text: Some("SELECT * FROM `app`.`sessions`".to_string()),
+            query_running: false,
+            has_results: false,
+            has_related_tables: true,
+            has_saved_bookmarks: true,
+            pagination_enabled: false,
+            can_page_next: false,
+            can_page_previous: false,
+        };
+
+        let jump = engine
+            .invoke(ActionId::JumpToRelatedTable, &context)
+            .expect("relationship jump should be enabled");
+        assert_eq!(jump, ActionInvocation::JumpToRelatedTable);
+
+        let save = engine
+            .invoke(ActionId::SaveBookmark, &context)
+            .expect("save bookmark should be enabled");
+        assert_eq!(save, ActionInvocation::SaveBookmark);
+
+        let open = engine
+            .invoke(ActionId::OpenBookmark, &context)
+            .expect("open bookmark should be enabled");
+        assert_eq!(open, ActionInvocation::OpenBookmark);
+    }
+
+    #[test]
+    fn export_variant_actions_resolve_to_expected_formats() {
+        let mut engine = ActionsEngine::new();
+        let context = ActionContext {
+            view: AppView::Results,
+            selection: SchemaSelection {
+                database: Some("app".to_string()),
+                table: Some("events".to_string()),
+                column: Some("id".to_string()),
+            },
+            query_text: None,
+            query_running: false,
+            has_results: true,
+            has_related_tables: false,
+            has_saved_bookmarks: false,
+            pagination_enabled: false,
+            can_page_next: false,
+            can_page_previous: false,
+        };
+
+        assert_eq!(
+            engine
+                .invoke(ActionId::ExportCsvGzip, &context)
+                .expect("csv gzip should be enabled"),
+            ActionInvocation::ExportResults(super::ExportFormat::CsvGzip)
+        );
+        assert_eq!(
+            engine
+                .invoke(ActionId::ExportJsonGzip, &context)
+                .expect("json gzip should be enabled"),
+            ActionInvocation::ExportResults(super::ExportFormat::JsonGzip)
+        );
+        assert_eq!(
+            engine
+                .invoke(ActionId::ExportJsonLines, &context)
+                .expect("jsonl should be enabled"),
+            ActionInvocation::ExportResults(super::ExportFormat::JsonLines)
+        );
+        assert_eq!(
+            engine
+                .invoke(ActionId::ExportJsonLinesGzip, &context)
+                .expect("jsonl gzip should be enabled"),
+            ActionInvocation::ExportResults(super::ExportFormat::JsonLinesGzip)
+        );
     }
 }

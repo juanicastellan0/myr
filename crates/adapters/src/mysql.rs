@@ -6,7 +6,8 @@ use myr_core::connection_manager::{BackendError, ConnectionBackend};
 use myr_core::profiles::{ConnectionProfile, PasswordSource, TlsMode};
 use myr_core::query_runner::{QueryBackend, QueryBackendError, QueryRow, QueryRowStream};
 use myr_core::schema_cache::{
-    ColumnSchema, DatabaseSchema, SchemaBackend, SchemaBackendError, SchemaCatalog, TableSchema,
+    ColumnSchema, DatabaseSchema, ForeignKeySchema, SchemaBackend, SchemaBackendError,
+    SchemaCatalog, TableSchema,
 };
 use mysql_async::prelude::{Query, Queryable};
 use mysql_async::{
@@ -100,9 +101,36 @@ impl SchemaBackend for MysqlDataBackend {
                     .await
                     .map_err(to_schema_error)?;
 
+                let foreign_keys = conn
+                    .exec_map(
+                        "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \
+                         REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+                         FROM information_schema.KEY_COLUMN_USAGE \
+                         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                           AND REFERENCED_TABLE_NAME IS NOT NULL \
+                         ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
+                        (database.clone(), table.clone()),
+                        |(
+                            constraint_name,
+                            column_name,
+                            referenced_database,
+                            referenced_table,
+                            referenced_column,
+                        ): (String, String, String, String, String)| ForeignKeySchema {
+                            constraint_name,
+                            column_name,
+                            referenced_database,
+                            referenced_table,
+                            referenced_column,
+                        },
+                    )
+                    .await
+                    .map_err(to_schema_error)?;
+
                 catalog_tables.push(TableSchema {
                     name: table,
                     columns,
+                    foreign_keys,
                 });
             }
 

@@ -13,9 +13,19 @@ pub struct ColumnSchema {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeySchema {
+    pub constraint_name: String,
+    pub column_name: String,
+    pub referenced_database: String,
+    pub referenced_table: String,
+    pub referenced_column: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<ColumnSchema>,
+    pub foreign_keys: Vec<ForeignKeySchema>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +44,22 @@ impl SchemaCatalog {
     pub fn database(&self, name: &str) -> Option<&DatabaseSchema> {
         self.databases.iter().find(|database| database.name == name)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RelationshipDirection {
+    Outbound,
+    Inbound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableRelationship {
+    pub direction: RelationshipDirection,
+    pub constraint_name: String,
+    pub source_column: String,
+    pub related_database: String,
+    pub related_table: String,
+    pub related_column: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -147,6 +173,60 @@ impl<B: SchemaBackend> SchemaCacheService<B> {
         Ok(columns)
     }
 
+    pub async fn list_related_tables(
+        &mut self,
+        database_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<TableRelationship>, SchemaCacheError> {
+        let schema = self.schema().await?;
+        let mut relationships = Vec::new();
+
+        let Some(database) = schema.database(database_name) else {
+            return Ok(relationships);
+        };
+
+        if let Some(table) = database.tables.iter().find(|table| table.name == table_name) {
+            for foreign_key in &table.foreign_keys {
+                relationships.push(TableRelationship {
+                    direction: RelationshipDirection::Outbound,
+                    constraint_name: foreign_key.constraint_name.clone(),
+                    source_column: foreign_key.column_name.clone(),
+                    related_database: foreign_key.referenced_database.clone(),
+                    related_table: foreign_key.referenced_table.clone(),
+                    related_column: foreign_key.referenced_column.clone(),
+                });
+            }
+        }
+
+        for candidate_table in &database.tables {
+            for foreign_key in &candidate_table.foreign_keys {
+                if foreign_key.referenced_table == table_name
+                    && foreign_key.referenced_database == database_name
+                {
+                    relationships.push(TableRelationship {
+                        direction: RelationshipDirection::Inbound,
+                        constraint_name: foreign_key.constraint_name.clone(),
+                        source_column: foreign_key.referenced_column.clone(),
+                        related_database: database_name.to_string(),
+                        related_table: candidate_table.name.clone(),
+                        related_column: foreign_key.column_name.clone(),
+                    });
+                }
+            }
+        }
+
+        relationships.sort_unstable_by(|left, right| {
+            left.related_database
+                .cmp(&right.related_database)
+                .then_with(|| left.related_table.cmp(&right.related_table))
+                .then_with(|| left.related_column.cmp(&right.related_column))
+                .then_with(|| left.constraint_name.cmp(&right.constraint_name))
+                .then_with(|| left.direction.cmp(&right.direction))
+        });
+
+        Ok(relationships)
+    }
+
     async fn schema_at(&mut self, now: Instant) -> Result<Arc<SchemaCatalog>, SchemaCacheError> {
         if let Some(cache) = &self.cache {
             if now.duration_since(cache.fetched_at) <= self.ttl {
@@ -181,8 +261,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ColumnSchema, DatabaseSchema, SchemaBackend, SchemaBackendError, SchemaCacheService,
-        SchemaCatalog, TableSchema,
+        ColumnSchema, DatabaseSchema, ForeignKeySchema, RelationshipDirection, SchemaBackend,
+        SchemaBackendError, SchemaCacheService, SchemaCatalog, TableSchema,
     };
 
     #[derive(Debug, Clone)]
@@ -221,14 +301,30 @@ mod tests {
                                     default_value: None,
                                 },
                             ],
+                            foreign_keys: Vec::new(),
                         },
                         TableSchema {
                             name: "sessions".to_string(),
-                            columns: vec![ColumnSchema {
-                                name: "token".to_string(),
-                                data_type: "varchar(255)".to_string(),
-                                nullable: false,
-                                default_value: None,
+                            columns: vec![
+                                ColumnSchema {
+                                    name: "user_id".to_string(),
+                                    data_type: "bigint".to_string(),
+                                    nullable: false,
+                                    default_value: None,
+                                },
+                                ColumnSchema {
+                                    name: "token".to_string(),
+                                    data_type: "varchar(255)".to_string(),
+                                    nullable: false,
+                                    default_value: None,
+                                },
+                            ],
+                            foreign_keys: vec![ForeignKeySchema {
+                                constraint_name: "fk_sessions_users".to_string(),
+                                column_name: "user_id".to_string(),
+                                referenced_database: "app".to_string(),
+                                referenced_table: "users".to_string(),
+                                referenced_column: "id".to_string(),
                             }],
                         },
                     ],
@@ -243,6 +339,7 @@ mod tests {
                             nullable: false,
                             default_value: None,
                         }],
+                        foreign_keys: Vec::new(),
                     }],
                 },
             ],
@@ -309,5 +406,33 @@ mod tests {
         assert_eq!(columns.len(), 2);
         assert_eq!(columns[0].name, "id");
         assert_eq!(columns[1].name, "email");
+    }
+
+    #[tokio::test]
+    async fn list_related_tables_returns_outbound_and_inbound_relationships() {
+        let backend = FakeSchemaBackend {
+            fetch_count: Arc::new(AtomicUsize::new(0)),
+            schema: sample_schema(),
+        };
+        let mut cache = SchemaCacheService::new(backend, Duration::from_secs(60));
+
+        let related = cache
+            .list_related_tables("app", "users")
+            .await
+            .expect("relationship listing should succeed");
+
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].direction, RelationshipDirection::Inbound);
+        assert_eq!(related[0].related_table, "sessions");
+        assert_eq!(related[0].related_column, "user_id");
+
+        let outbound = cache
+            .list_related_tables("app", "sessions")
+            .await
+            .expect("relationship listing should succeed");
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].direction, RelationshipDirection::Outbound);
+        assert_eq!(outbound[0].related_table, "users");
+        assert_eq!(outbound[0].related_column, "id");
     }
 }
