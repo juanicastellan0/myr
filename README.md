@@ -38,6 +38,10 @@ and benchmark/coverage gates. The detailed product backlog is in
 - Export to CSV/JSON
 - Benchmark runner + perf smoke checks
 
+## Visual Status Cues
+
+![TUI runtime badges and pane flash demo](docs/assets/tui-status-tabs.gif)
+
 ## MySQL Connection Notes
 
 - Connection profiles in the TUI now attempt real MySQL connections via `mysql_async`.
@@ -76,6 +80,7 @@ and benchmark/coverage gates. The detailed product backlog is in
 - CI coverage gate:
   - minimum lines: `80%`
   - MySQL-backed integration tests enabled via `MYR_RUN_MYSQL_INTEGRATION=1`
+  - TUI MySQL integration gate enabled via `MYR_RUN_TUI_MYSQL_INTEGRATION=1`
   - see `.github/workflows/ci.yml`
 - CI cross-platform validation:
   - test + build on `ubuntu-latest`, `macos-latest`, and `windows-latest`

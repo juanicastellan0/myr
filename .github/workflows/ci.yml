@@ -125,6 +125,57 @@ jobs:
             --assert-first-row-ms 5000 \
             --assert-min-rows-per-sec 500
 
+  tui-mysql-integration:
+    name: TUI MySQL integration (gated)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    env:
+      MYR_DB_PASSWORD: root
+      MYR_RUN_TUI_MYSQL_INTEGRATION: "1"
+      MYR_TEST_DB_HOST: 127.0.0.1
+      MYR_TEST_DB_PORT: "3306"
+      MYR_TEST_DB_USER: root
+      MYR_TEST_DB_DATABASE: myr_bench
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Seed integration dataset
+        run: |
+          cargo run -p myr-app --bin benchmark -- \
+            --host 127.0.0.1 \
+            --port 3306 \
+            --user root \
+            --database mysql \
+            --sql "CREATE DATABASE IF NOT EXISTS myr_bench"
+          cargo run -p myr-app --bin benchmark -- \
+            --host 127.0.0.1 \
+            --port 3306 \
+            --user root \
+            --database myr_bench \
+            --seed-rows 200 \
+            --sql "SELECT id, user_id, category, payload, created_at FROM events ORDER BY id LIMIT 20"
+
+      - name: Run gated TUI integration test
+        run: cargo test -p myr-tui mysql_query_path_streams_rows_when_enabled -- --nocapture
+
   cross-platform:
     name: Cross-platform validation (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

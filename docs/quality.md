@@ -36,7 +36,7 @@ Current gate settings:
 - MySQL integration coverage enabled with:
   - `MYR_DB_PASSWORD=root`
   - `MYR_RUN_MYSQL_INTEGRATION=1`
-- optional TUI MySQL query-path integration:
+- gated TUI MySQL query-path integration:
   - `MYR_DB_PASSWORD=root`
   - `MYR_RUN_TUI_MYSQL_INTEGRATION=1`
 - cross-platform validation:
