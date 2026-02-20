@@ -21,7 +21,7 @@ use myr_core::connection_manager::ConnectionManager;
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore};
 use myr_core::query_runner::{CancellationToken, QueryRow, QueryRunner};
 use myr_core::results_buffer::ResultsRingBuffer;
-use myr_core::safe_mode::{ConfirmationToken, GuardDecision, SafeModeGuard};
+use myr_core::safe_mode::{assess_sql_safety, ConfirmationToken, GuardDecision, SafeModeGuard};
 use myr_core::schema_cache::SchemaCacheService;
 use myr_core::sql_generator::{
     keyset_first_page_sql, keyset_page_sql, offset_page_sql, PaginationDirection, SqlTarget,
@@ -113,6 +113,7 @@ enum WizardField {
     Port,
     User,
     Database,
+    ReadOnly,
 }
 
 impl WizardField {
@@ -122,7 +123,8 @@ impl WizardField {
             Self::Host => Self::Port,
             Self::Port => Self::User,
             Self::User => Self::Database,
-            Self::Database => Self::ProfileName,
+            Self::Database => Self::ReadOnly,
+            Self::ReadOnly => Self::ProfileName,
         }
     }
 
@@ -133,6 +135,7 @@ impl WizardField {
             Self::Port => "Port",
             Self::User => "User",
             Self::Database => "Database",
+            Self::ReadOnly => "Read-only",
         }
     }
 }
@@ -144,6 +147,7 @@ struct ConnectionWizardForm {
     port: String,
     user: String,
     database: String,
+    read_only: String,
     active_field: WizardField,
     editing: bool,
     edit_buffer: String,
@@ -157,6 +161,7 @@ impl Default for ConnectionWizardForm {
             port: "3306".to_string(),
             user: "root".to_string(),
             database: "app".to_string(),
+            read_only: "no".to_string(),
             active_field: WizardField::ProfileName,
             editing: false,
             edit_buffer: String::new(),
@@ -186,6 +191,7 @@ enum Msg {
     Navigate(DirectionKey),
     InvokeActionSlot(usize),
     InputChar(char),
+    InsertNewline,
     Backspace,
     ClearInput,
     Connect,
@@ -319,6 +325,10 @@ struct TuiApp {
     exit_confirmation: bool,
     status_line: String,
     query_editor_text: String,
+    query_cursor: usize,
+    query_history: Vec<String>,
+    query_history_index: Option<usize>,
+    query_history_draft: Option<String>,
     selection: SchemaSelection,
 }
 
@@ -392,6 +402,10 @@ impl Default for TuiApp {
             exit_confirmation: false,
             status_line: "Select a field with Up/Down, press E to edit, F5 to connect".to_string(),
             query_editor_text: "SELECT * FROM `users`".to_string(),
+            query_cursor: "SELECT * FROM `users`".len(),
+            query_history: Vec::new(),
+            query_history_index: None,
+            query_history_draft: None,
             selection: SchemaSelection {
                 database: Some("app".to_string()),
                 table: Some("users".to_string()),
@@ -540,6 +554,7 @@ impl TuiApp {
             Msg::Navigate(direction) => self.navigate(direction),
             Msg::InvokeActionSlot(index) => self.invoke_ranked_action(index),
             Msg::InputChar(ch) => self.handle_input_char(ch),
+            Msg::InsertNewline => self.handle_insert_newline(),
             Msg::Backspace => self.handle_backspace(),
             Msg::ClearInput => self.handle_clear_input(),
             Msg::Tick => self.on_tick(),
@@ -727,6 +742,9 @@ impl TuiApp {
             .port
             .parse::<u16>()
             .map_err(|_| "Invalid port in connection wizard".to_string())?;
+        let read_only = parse_read_only_flag(&self.wizard_form.read_only).ok_or_else(|| {
+            "Invalid read-only mode in connection wizard (use yes/no)".to_string()
+        })?;
 
         let mut profile = ConnectionProfile::new(
             self.wizard_form.profile_name.clone(),
@@ -739,6 +757,7 @@ impl TuiApp {
         } else {
             Some(self.wizard_form.database.clone())
         };
+        profile.read_only = read_only;
         Ok(profile)
     }
 
@@ -831,6 +850,11 @@ impl TuiApp {
 
         self.active_connection_profile = Some(profile.clone());
         self.last_connect_profile = Some(profile.clone());
+        self.wizard_form.read_only = if profile.read_only {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        };
         self.data_backend = Some(data_backend);
         self.schema_cache = Some(schema_cache);
         self.schema_databases = databases;
@@ -1028,9 +1052,12 @@ impl TuiApp {
             }
             Pane::SchemaExplorer => self.navigate_schema(direction),
             Pane::Results => self.navigate_results(direction),
-            Pane::QueryEditor => {
-                self.status_line = format!("Navigation in editor: {direction:?}");
-            }
+            Pane::QueryEditor => match direction {
+                DirectionKey::Left => self.move_query_cursor_left(),
+                DirectionKey::Right => self.move_query_cursor_right(),
+                DirectionKey::Up => self.use_previous_query_from_history(),
+                DirectionKey::Down => self.use_next_query_from_history(),
+            },
         }
     }
 
@@ -1055,11 +1082,12 @@ impl TuiApp {
 
     fn previous_wizard_field(&self) -> WizardField {
         match self.wizard_form.active_field {
-            WizardField::ProfileName => WizardField::Database,
+            WizardField::ProfileName => WizardField::ReadOnly,
             WizardField::Host => WizardField::ProfileName,
             WizardField::Port => WizardField::Host,
             WizardField::User => WizardField::Port,
             WizardField::Database => WizardField::User,
+            WizardField::ReadOnly => WizardField::Database,
         }
     }
 
@@ -1235,6 +1263,9 @@ impl TuiApp {
         } else {
             self.query_editor_text = format!("SELECT * FROM {table_sql}");
         }
+        self.query_cursor = self.query_editor_text.len();
+        self.query_history_index = None;
+        self.query_history_draft = None;
     }
 
     fn navigate_results(&mut self, direction: DirectionKey) {
@@ -1431,9 +1462,22 @@ impl TuiApp {
                 self.status_line = format!("Editing {}", self.wizard_form.active_field.label());
             }
         } else if self.pane == Pane::QueryEditor {
-            self.query_editor_text.push(ch);
+            self.insert_text_at_query_cursor(&ch.to_string());
             self.status_line = "Query text updated".to_string();
         }
+    }
+
+    fn handle_insert_newline(&mut self) {
+        if self.show_palette || self.results_search_mode {
+            return;
+        }
+        if self.pane != Pane::QueryEditor {
+            self.status_line = "Newline insert is only available in query editor".to_string();
+            return;
+        }
+
+        self.insert_text_at_query_cursor("\n");
+        self.status_line = "Inserted newline".to_string();
     }
 
     fn handle_backspace(&mut self) {
@@ -1452,7 +1496,7 @@ impl TuiApp {
                 );
             }
         } else if self.pane == Pane::QueryEditor {
-            self.query_editor_text.pop();
+            self.backspace_query_editor_char();
             self.status_line = "Query text updated".to_string();
         }
     }
@@ -1474,8 +1518,141 @@ impl TuiApp {
             }
         } else if self.pane == Pane::QueryEditor {
             self.query_editor_text.clear();
+            self.query_cursor = 0;
+            self.query_history_index = None;
+            self.query_history_draft = None;
             self.status_line = "Query cleared".to_string();
         }
+    }
+
+    fn insert_text_at_query_cursor(&mut self, text: &str) {
+        self.clamp_query_cursor();
+        self.query_editor_text.insert_str(self.query_cursor, text);
+        self.query_cursor = self
+            .query_cursor
+            .saturating_add(text.len())
+            .min(self.query_editor_text.len());
+        self.query_history_index = None;
+    }
+
+    fn backspace_query_editor_char(&mut self) {
+        self.clamp_query_cursor();
+        if self.query_cursor == 0 {
+            return;
+        }
+        let previous = previous_char_boundary(&self.query_editor_text, self.query_cursor);
+        self.query_editor_text
+            .replace_range(previous..self.query_cursor, "");
+        self.query_cursor = previous;
+        self.query_history_index = None;
+    }
+
+    fn move_query_cursor_left(&mut self) {
+        self.clamp_query_cursor();
+        self.query_cursor = previous_char_boundary(&self.query_editor_text, self.query_cursor);
+        let (line, column) = self.query_cursor_line_col();
+        self.status_line = format!("Cursor moved to line {line}, col {column}");
+    }
+
+    fn move_query_cursor_right(&mut self) {
+        self.clamp_query_cursor();
+        self.query_cursor = next_char_boundary(&self.query_editor_text, self.query_cursor);
+        let (line, column) = self.query_cursor_line_col();
+        self.status_line = format!("Cursor moved to line {line}, col {column}");
+    }
+
+    fn use_previous_query_from_history(&mut self) {
+        if self.query_history.is_empty() {
+            self.status_line = "Query history is empty".to_string();
+            return;
+        }
+
+        let next_index = match self.query_history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.query_history_draft = Some(self.query_editor_text.clone());
+                self.query_history.len().saturating_sub(1)
+            }
+        };
+
+        self.query_history_index = Some(next_index);
+        self.query_editor_text = self.query_history[next_index].clone();
+        self.query_cursor = self.query_editor_text.len();
+        self.status_line = format!(
+            "History {} / {}",
+            next_index + 1,
+            self.query_history.len()
+        );
+    }
+
+    fn use_next_query_from_history(&mut self) {
+        let Some(index) = self.query_history_index else {
+            self.status_line = "Already at latest editor query".to_string();
+            return;
+        };
+
+        if index + 1 < self.query_history.len() {
+            let next_index = index + 1;
+            self.query_history_index = Some(next_index);
+            self.query_editor_text = self.query_history[next_index].clone();
+            self.query_cursor = self.query_editor_text.len();
+            self.status_line = format!(
+                "History {} / {}",
+                next_index + 1,
+                self.query_history.len()
+            );
+            return;
+        }
+
+        self.query_history_index = None;
+        if let Some(draft) = self.query_history_draft.take() {
+            self.query_editor_text = draft;
+        }
+        self.query_cursor = self.query_editor_text.len();
+        self.status_line = "Returned to latest editor query".to_string();
+    }
+
+    fn record_query_history(&mut self, sql: &str) {
+        let trimmed = sql.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        if self
+            .query_history
+            .last()
+            .is_some_and(|last| last.as_str() == trimmed)
+        {
+            return;
+        }
+
+        self.query_history.push(trimmed.to_string());
+        if self.query_history.len() > 100 {
+            let overflow = self.query_history.len() - 100;
+            self.query_history.drain(0..overflow);
+        }
+    }
+
+    fn clamp_query_cursor(&mut self) {
+        if self.query_cursor > self.query_editor_text.len() {
+            self.query_cursor = self.query_editor_text.len();
+        }
+        while self.query_cursor > 0 && !self.query_editor_text.is_char_boundary(self.query_cursor)
+        {
+            self.query_cursor = self.query_cursor.saturating_sub(1);
+        }
+    }
+
+    fn query_cursor_line_col(&self) -> (usize, usize) {
+        let cursor = self.query_cursor.min(self.query_editor_text.len());
+        let prefix = &self.query_editor_text[..cursor];
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = prefix
+            .rsplit('\n')
+            .next()
+            .map(|segment| segment.chars().count() + 1)
+            .unwrap_or(1);
+        (line, column)
     }
 
     fn start_wizard_edit(&mut self) {
@@ -1518,6 +1695,7 @@ impl TuiApp {
             WizardField::Port => self.wizard_form.port.as_str(),
             WizardField::User => self.wizard_form.user.as_str(),
             WizardField::Database => self.wizard_form.database.as_str(),
+            WizardField::ReadOnly => self.wizard_form.read_only.as_str(),
         }
     }
 
@@ -1528,6 +1706,7 @@ impl TuiApp {
             WizardField::Port => &mut self.wizard_form.port,
             WizardField::User => &mut self.wizard_form.user,
             WizardField::Database => &mut self.wizard_form.database,
+            WizardField::ReadOnly => &mut self.wizard_form.read_only,
         }
     }
 
@@ -1580,9 +1759,13 @@ impl TuiApp {
             self.last_failed_query = None;
             self.pending_retry_query = None;
             self.reconnect_attempts = 0;
+            self.record_query_history(&sql);
+            self.query_history_index = None;
+            self.query_history_draft = None;
         }
         self.inflight_query_sql = Some(sql.clone());
         self.query_editor_text = sql;
+        self.query_cursor = self.query_editor_text.len();
         self.set_active_pane(Pane::Results);
         self.results_search_mode = false;
         self.results_search_query.clear();
@@ -1616,7 +1799,24 @@ impl TuiApp {
         self.status_line = "Running query...".to_string();
     }
 
+    fn current_profile_read_only(&self) -> bool {
+        self.active_connection_profile
+            .as_ref()
+            .or(self.last_connect_profile.as_ref())
+            .is_some_and(|profile| profile.read_only)
+    }
+
     fn execute_sql_with_guard(&mut self, sql: String) {
+        if self.current_profile_read_only() {
+            let assessment = assess_sql_safety(&sql);
+            if !assessment.is_safe_read_only() {
+                self.pending_confirmation = None;
+                self.status_line = "Blocked by read-only profile mode: write/DDL SQL is disabled"
+                    .to_string();
+                return;
+            }
+        }
+
         match self.safe_mode_guard.evaluate(&sql) {
             GuardDecision::Allow { .. } => {
                 self.pending_confirmation = None;
@@ -1625,6 +1825,7 @@ impl TuiApp {
             GuardDecision::RequireConfirmation { token, assessment } => {
                 self.pending_confirmation = Some((token, sql.clone()));
                 self.query_editor_text = sql;
+                self.query_cursor = self.query_editor_text.len();
                 self.set_active_pane(Pane::QueryEditor);
                 self.status_line = format!(
                     "Safe mode confirmation required: {:?}. Press Enter again to confirm.",
@@ -1846,7 +2047,16 @@ impl TuiApp {
             }
             ActionInvocation::ReplaceQueryEditorText(query) => {
                 self.query_editor_text = query;
-                self.status_line = "Applied LIMIT suggestion".to_string();
+                self.query_cursor = self.query_editor_text.len();
+                self.query_history_index = None;
+                self.query_history_draft = None;
+                self.set_active_pane(Pane::QueryEditor);
+                self.status_line = "Query editor updated".to_string();
+            }
+            ActionInvocation::InsertQueryEditorText(snippet) => {
+                self.set_active_pane(Pane::QueryEditor);
+                self.insert_text_at_query_cursor(&snippet);
+                self.status_line = "Inserted query snippet".to_string();
             }
             ActionInvocation::CancelQuery => {
                 self.query_running = false;
@@ -2106,6 +2316,9 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     let latency_text = app
         .last_connection_latency
         .map_or("n/a".to_string(), |latency| format!("{latency:.1?}"));
+    let profile_mode = app.active_connection_profile.as_ref().map_or("-", |profile| {
+        if profile.read_only { "RO" } else { "RW" }
+    });
     let heartbeat = spinner_char(app.loading_tick);
     let loading_text = if app.connect_requested && app.connect_intent == ConnectIntent::AutoReconnect
     {
@@ -2168,6 +2381,8 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             "Profile: {}",
             app.connected_profile.as_deref().unwrap_or("not connected")
         )),
+        Span::raw(" | "),
+        Span::raw(format!("Mode: {profile_mode}")),
         Span::raw(" | "),
         Span::raw(format!(
             "DB: {}",
@@ -2258,6 +2473,11 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                     WizardField::Database,
                     "Database",
                     app.wizard_form.database.as_str(),
+                ),
+                (
+                    WizardField::ReadOnly,
+                    "Read-only (yes/no)",
+                    app.wizard_form.read_only.as_str(),
                 ),
             ];
 
@@ -2432,13 +2652,38 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             }
             lines
         }
-        Pane::QueryEditor => vec![
-            Line::from("Query Editor"),
-            Line::from(app.query_editor_text.as_str()),
-            Line::from("Enter to run query, 1..7 for ranked actions."),
-            Line::from("Tab: next pane | F6: connection wizard"),
-            Line::from("Ctrl+P opens palette placeholder."),
-        ],
+        Pane::QueryEditor => {
+            let mut lines = vec![
+                Line::from("Query Editor"),
+                Line::from("Enter: run query | Ctrl+Enter: newline"),
+                Line::from("Left/Right: cursor | Up/Down: query history"),
+                Line::from(""),
+            ];
+
+            let mut editor_lines = app.query_editor_text.lines().collect::<Vec<_>>();
+            if app.query_editor_text.ends_with('\n') {
+                editor_lines.push("");
+            }
+
+            if editor_lines.is_empty() {
+                lines.push(Line::from("  (empty query)"));
+            } else {
+                for (index, line) in editor_lines.iter().enumerate() {
+                    lines.push(Line::from(format!("{:02} {}", index + 1, line)));
+                }
+            }
+
+            let (cursor_line, cursor_col) = app.query_cursor_line_col();
+            let history_state = match app.query_history_index {
+                Some(index) => format!("history {} / {}", index + 1, app.query_history.len()),
+                None => format!("history {}", app.query_history.len()),
+            };
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "Cursor: line {cursor_line}, col {cursor_col} | {history_state}"
+            )));
+            lines
+        }
     };
 
     let body = Paragraph::new(body_text)
@@ -2495,7 +2740,8 @@ fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
         Line::from("Connection wizard: E/Enter edit, F5 connect"),
-        Line::from("Enter: run query (Query Editor)"),
+        Line::from("Query editor: Enter run, Ctrl+Enter newline"),
+        Line::from("Query editor: Left/Right cursor, Up/Down history"),
         Line::from("F2: toggle perf overlay"),
         Line::from("F3: toggle safe mode"),
         Line::from("Ctrl+P: command palette"),
@@ -2638,6 +2884,40 @@ fn connection_badge_and_marker(connection_state: &str, tick: usize) -> (&'static
         "CONNECTED" => ("[+]", pulse_char(tick)),
         "CONNECTING" | "RECONNECTING" => ("[~]", spinner_char(tick)),
         _ => ("[x]", if tick % 2 == 0 { '-' } else { ' ' }),
+    }
+}
+
+fn parse_read_only_flag(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" | "ro" | "read-only" => Some(true),
+        "0" | "false" | "no" | "n" | "off" | "rw" | "read-write" | "" => Some(false),
+        _ => None,
+    }
+}
+
+fn previous_char_boundary(text: &str, index: usize) -> usize {
+    let clamped = index.min(text.len());
+    if clamped == 0 {
+        return 0;
+    }
+
+    text[..clamped]
+        .char_indices()
+        .last()
+        .map(|(position, _)| position)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    let clamped = index.min(text.len());
+    if clamped >= text.len() {
+        return text.len();
+    }
+
+    let mut iter = text[clamped..].char_indices();
+    match iter.nth(1) {
+        Some((offset, _)) => clamped + offset,
+        None => text.len(),
     }
 }
 
@@ -2855,6 +3135,7 @@ fn map_key_event(key: KeyEvent) -> Option<Msg> {
             KeyCode::Char('p') => Some(Msg::TogglePalette),
             KeyCode::Char('u') => Some(Msg::ClearInput),
             KeyCode::Char('c') => Some(Msg::CancelQuery),
+            KeyCode::Char('j') | KeyCode::Enter => Some(Msg::InsertNewline),
             _ => None,
         };
     }
@@ -2914,9 +3195,9 @@ mod tests {
     use super::{
         candidate_key_column, centered_rect, connection_badge_and_marker, extract_key_bounds,
         is_connection_lost_error, is_transient_query_error, map_key_event, quote_identifier,
-        render, suggest_limit_in_editor, ActionId, ActionInvocation, AppView, ConnectIntent,
-        DirectionKey, ErrorKind, Msg, MysqlDataBackend, PaginationPlan, Pane, QueryRow,
-        QueryWorkerOutcome, ResultsRingBuffer, SchemaLane, TuiApp, WizardField,
+        parse_read_only_flag, render, suggest_limit_in_editor, ActionId, ActionInvocation,
+        AppView, ConnectIntent, DirectionKey, ErrorKind, Msg, MysqlDataBackend, PaginationPlan,
+        Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer, SchemaLane, TuiApp, WizardField,
         QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
     };
 
@@ -3147,6 +3428,15 @@ mod tests {
     }
 
     #[test]
+    fn read_only_parser_accepts_common_values() {
+        assert_eq!(parse_read_only_flag("yes"), Some(true));
+        assert_eq!(parse_read_only_flag("RO"), Some(true));
+        assert_eq!(parse_read_only_flag("no"), Some(false));
+        assert_eq!(parse_read_only_flag("rw"), Some(false));
+        assert_eq!(parse_read_only_flag("maybe"), None);
+    }
+
+    #[test]
     fn limit_suggestion_is_applied_in_editor_helper() {
         let suggested = suggest_limit_in_editor("SELECT * FROM users");
         assert_eq!(suggested, Some("SELECT * FROM users LIMIT 200".to_string()));
@@ -3256,6 +3546,29 @@ mod tests {
     }
 
     #[test]
+    fn read_only_profile_blocks_destructive_submit() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+        let mut profile = ConnectionProfile::new(
+            "local-ro".to_string(),
+            "127.0.0.1".to_string(),
+            "root".to_string(),
+        );
+        profile.read_only = true;
+        app.active_connection_profile = Some(profile.clone());
+        app.last_connect_profile = Some(profile);
+        app.query_editor_text = "DELETE FROM `app`.`users` WHERE id = 1".to_string();
+
+        app.submit();
+
+        assert!(!app.query_running);
+        assert!(app.pending_confirmation.is_none());
+        assert_eq!(
+            app.status_line,
+            "Blocked by read-only profile mode: write/DDL SQL is disabled"
+        );
+    }
+
+    #[test]
     fn query_failure_retries_once_when_transient() {
         let mut app = app_in_pane(Pane::QueryEditor);
         app.query_running = true;
@@ -3327,6 +3640,18 @@ mod tests {
         app.connect_from_wizard();
 
         assert_eq!(app.status_line, "Invalid port in connection wizard");
+    }
+
+    #[test]
+    fn connect_from_wizard_rejects_invalid_read_only_mode() {
+        let mut app = app_in_pane(Pane::ConnectionWizard);
+        app.wizard_form.read_only = "sometimes".to_string();
+        app.connect_from_wizard();
+
+        assert_eq!(
+            app.status_line,
+            "Invalid read-only mode in connection wizard (use yes/no)"
+        );
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::sql_generator::{
-    count_estimate_sql, describe_table_sql, preview_select_sql, show_create_table_sql,
-    show_index_sql, SqlGenerationError, SqlTarget,
+    count_estimate_sql, describe_table_sql, filtered_sorted_preview_sql, preview_select_sql,
+    quote_identifier, show_create_table_sql, show_index_sql, SqlGenerationError, SqlTarget,
 };
 
 const PREVIEW_LIMIT: usize = 200;
@@ -21,6 +21,10 @@ pub enum ActionId {
     CountEstimate,
     RunCurrentQuery,
     ApplyLimit200,
+    ExplainQuery,
+    BuildFilterSortQuery,
+    InsertSelectSnippet,
+    InsertJoinSnippet,
     CancelRunningQuery,
     ExportCsv,
     ExportJson,
@@ -94,7 +98,7 @@ pub struct ActionDefinition {
     pub description: &'static str,
 }
 
-const ACTIONS: [ActionDefinition; 16] = [
+const ACTIONS: [ActionDefinition; 20] = [
     ActionDefinition {
         id: ActionId::PreviewTable,
         title: "Preview table",
@@ -139,6 +143,26 @@ const ACTIONS: [ActionDefinition; 16] = [
         id: ActionId::ApplyLimit200,
         title: "Apply LIMIT 200",
         description: "Suggest a preview limit for broad SELECTs",
+    },
+    ActionDefinition {
+        id: ActionId::ExplainQuery,
+        title: "Explain query",
+        description: "Run EXPLAIN preflight for the current query",
+    },
+    ActionDefinition {
+        id: ActionId::BuildFilterSortQuery,
+        title: "Build filter/sort query",
+        description: "Generate server-side WHERE/ORDER BY query from selected schema target",
+    },
+    ActionDefinition {
+        id: ActionId::InsertSelectSnippet,
+        title: "Insert SELECT snippet",
+        description: "Insert a SELECT skeleton snippet into the editor",
+    },
+    ActionDefinition {
+        id: ActionId::InsertJoinSnippet,
+        title: "Insert JOIN snippet",
+        description: "Insert a JOIN skeleton snippet into the editor",
     },
     ActionDefinition {
         id: ActionId::CancelRunningQuery,
@@ -229,6 +253,7 @@ pub enum ActionInvocation {
     PaginatePrevious,
     PaginateNext,
     ReplaceQueryEditorText(String),
+    InsertQueryEditorText(String),
     CancelQuery,
     ExportResults(ExportFormat),
     CopyToClipboard(CopyTarget),
@@ -242,12 +267,16 @@ pub enum ActionEngineError {
     ActionDisabled(ActionId),
     #[error("selected table is required")]
     MissingTableSelection,
+    #[error("selected column is required")]
+    MissingColumnSelection,
     #[error("selected database is required")]
     MissingDatabaseSelection,
     #[error("query text is required")]
     MissingQueryText,
     #[error("no LIMIT suggestion is available for this query")]
     NoLimitSuggestion,
+    #[error("no EXPLAIN suggestion is available for this query")]
+    NoExplainSuggestion,
     #[error("failed to generate SQL: {0}")]
     SqlGeneration(#[from] SqlGenerationError),
 }
@@ -345,6 +374,30 @@ impl ActionsEngine {
                     .ok_or(ActionEngineError::NoLimitSuggestion)?;
                 ActionInvocation::ReplaceQueryEditorText(suggested)
             }
+            ActionId::ExplainQuery => {
+                let query = context
+                    .query_text
+                    .as_deref()
+                    .ok_or(ActionEngineError::MissingQueryText)?;
+                let explain =
+                    suggest_explain_query(query).ok_or(ActionEngineError::NoExplainSuggestion)?;
+                ActionInvocation::RunSql(explain)
+            }
+            ActionId::BuildFilterSortQuery => {
+                let target = context_selected_target(context)?;
+                let column = context_selected_column(context)?;
+                ActionInvocation::ReplaceQueryEditorText(filtered_sorted_preview_sql(
+                    &target,
+                    column,
+                    PREVIEW_LIMIT,
+                )?)
+            }
+            ActionId::InsertSelectSnippet => {
+                ActionInvocation::InsertQueryEditorText(select_snippet(context))
+            }
+            ActionId::InsertJoinSnippet => {
+                ActionInvocation::InsertQueryEditorText(join_snippet(context))
+            }
             ActionId::CancelRunningQuery => ActionInvocation::CancelQuery,
             ActionId::ExportCsv => ActionInvocation::ExportResults(ExportFormat::Csv),
             ActionId::ExportJson => ActionInvocation::ExportResults(ExportFormat::Json),
@@ -387,6 +440,14 @@ fn context_selected_target(context: &ActionContext) -> Result<SqlTarget<'_>, Act
     SqlTarget::new(context.selection.database.as_deref(), table).map_err(ActionEngineError::from)
 }
 
+fn context_selected_column(context: &ActionContext) -> Result<&str, ActionEngineError> {
+    context
+        .selection
+        .column
+        .as_deref()
+        .ok_or(ActionEngineError::MissingColumnSelection)
+}
+
 fn action_enabled(action_id: ActionId, context: &ActionContext) -> bool {
     match action_id {
         ActionId::PreviewTable
@@ -424,6 +485,22 @@ fn action_enabled(action_id: ActionId, context: &ActionContext) -> bool {
                     .as_deref()
                     .is_some_and(|query| suggest_preview_limit(query, PREVIEW_LIMIT).is_some())
         }
+        ActionId::ExplainQuery => {
+            !context.query_running
+                && context
+                    .query_text
+                    .as_deref()
+                    .is_some_and(|query| suggest_explain_query(query).is_some())
+        }
+        ActionId::BuildFilterSortQuery => {
+            !context.query_running
+                && context.selection.table.is_some()
+                && context.selection.database.is_some()
+                && context.selection.column.is_some()
+        }
+        ActionId::InsertSelectSnippet | ActionId::InsertJoinSnippet => {
+            !context.query_running && context.view == AppView::QueryEditor
+        }
         ActionId::CancelRunningQuery => context.query_running,
         ActionId::ExportCsv
         | ActionId::ExportJson
@@ -450,6 +527,41 @@ fn action_base_score(action_id: ActionId, context: &ActionContext) -> i32 {
                 .is_some_and(|query| suggest_preview_limit(query, PREVIEW_LIMIT).is_some())
             {
                 950
+            } else {
+                0
+            }
+        }
+        ActionId::ExplainQuery => {
+            if context
+                .query_text
+                .as_deref()
+                .is_some_and(|query| suggest_explain_query(query).is_some())
+            {
+                910
+            } else {
+                0
+            }
+        }
+        ActionId::BuildFilterSortQuery => {
+            if context.selection.table.is_some()
+                && context.selection.database.is_some()
+                && context.selection.column.is_some()
+            {
+                880
+            } else {
+                0
+            }
+        }
+        ActionId::InsertSelectSnippet => {
+            if context.view == AppView::QueryEditor {
+                820
+            } else {
+                0
+            }
+        }
+        ActionId::InsertJoinSnippet => {
+            if context.view == AppView::QueryEditor {
+                780
             } else {
                 0
             }
@@ -586,11 +698,67 @@ fn contains_limit_keyword(query: &str) -> bool {
         .any(|token| token.eq_ignore_ascii_case("LIMIT"))
 }
 
+#[must_use]
+pub fn suggest_explain_query(query_text: &str) -> Option<String> {
+    let trimmed = query_text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let without_trailing_semicolon = trimmed.trim_end_matches(';').trim();
+    if without_trailing_semicolon.is_empty() || starts_with_explain(without_trailing_semicolon) {
+        return None;
+    }
+
+    Some(format!("EXPLAIN {without_trailing_semicolon}"))
+}
+
+fn starts_with_explain(query: &str) -> bool {
+    let mut words = query.split_whitespace();
+    matches!(words.next(), Some(keyword) if keyword.eq_ignore_ascii_case("EXPLAIN"))
+}
+
+fn qualified_selection_reference(context: &ActionContext) -> String {
+    match (
+        context.selection.database.as_deref(),
+        context.selection.table.as_deref(),
+    ) {
+        (Some(database), Some(table)) => {
+            format!("{}.{}", quote_identifier(database), quote_identifier(table))
+        }
+        (_, Some(table)) => quote_identifier(table),
+        _ => "`table_name`".to_string(),
+    }
+}
+
+fn selected_or_default_column(context: &ActionContext) -> String {
+    context
+        .selection
+        .column
+        .as_deref()
+        .map_or_else(|| "`id`".to_string(), quote_identifier)
+}
+
+fn select_snippet(context: &ActionContext) -> String {
+    let table_ref = qualified_selection_reference(context);
+    let column = selected_or_default_column(context);
+    format!(
+        "SELECT *\nFROM {table_ref}\nWHERE {column} = 'value'\nORDER BY {column} DESC\nLIMIT {PREVIEW_LIMIT};"
+    )
+}
+
+fn join_snippet(context: &ActionContext) -> String {
+    let left_table = qualified_selection_reference(context);
+    format!(
+        "SELECT t1.*, t2.*\nFROM {left_table} AS t1\nJOIN `app`.`table_two` AS t2 ON t1.`id` = t2.`table_one_id`\nLIMIT {PREVIEW_LIMIT};"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        suggest_preview_limit, ActionContext, ActionId, ActionInvocation, ActionsEngine, AppView,
-        SchemaSelection,
+        suggest_explain_query, suggest_preview_limit, ActionContext, ActionId, ActionInvocation,
+        ActionsEngine, AppView, SchemaSelection,
     };
 
     fn schema_context() -> ActionContext {
@@ -678,6 +846,87 @@ mod tests {
             None
         );
         assert_eq!(suggest_preview_limit("DELETE FROM users", 200), None);
+    }
+
+    #[test]
+    fn suggest_explain_query_wraps_non_explain_sql() {
+        assert_eq!(
+            suggest_explain_query("SELECT * FROM users"),
+            Some("EXPLAIN SELECT * FROM users".to_string())
+        );
+        assert_eq!(
+            suggest_explain_query("EXPLAIN SELECT * FROM users"),
+            None
+        );
+        assert_eq!(suggest_explain_query(""), None);
+    }
+
+    #[test]
+    fn explain_action_generates_preflight_sql() {
+        let mut engine = ActionsEngine::new();
+        let context = ActionContext::default()
+            .with_view(AppView::QueryEditor)
+            .with_query("SELECT * FROM users");
+
+        let invocation = engine
+            .invoke(ActionId::ExplainQuery, &context)
+            .expect("EXPLAIN should be invokable");
+        assert_eq!(
+            invocation,
+            ActionInvocation::RunSql("EXPLAIN SELECT * FROM users".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_sort_builder_action_generates_server_side_query() {
+        let mut engine = ActionsEngine::new();
+        let context = ActionContext {
+            view: AppView::SchemaExplorer,
+            selection: SchemaSelection {
+                database: Some("app".to_string()),
+                table: Some("users".to_string()),
+                column: Some("email".to_string()),
+            },
+            query_text: None,
+            query_running: false,
+            has_results: false,
+            pagination_enabled: false,
+            can_page_next: false,
+            can_page_previous: false,
+        };
+
+        let invocation = engine
+            .invoke(ActionId::BuildFilterSortQuery, &context)
+            .expect("filter/sort builder should be invokable");
+        assert_eq!(
+            invocation,
+            ActionInvocation::ReplaceQueryEditorText(
+                "SELECT * FROM `app`.`users` WHERE `email` LIKE '%search%' ORDER BY `email` ASC LIMIT 200"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn snippet_actions_insert_editor_templates() {
+        let mut engine = ActionsEngine::new();
+        let context = ActionContext::default().with_view(AppView::QueryEditor);
+
+        let select_snippet = engine
+            .invoke(ActionId::InsertSelectSnippet, &context)
+            .expect("select snippet should be invokable");
+        assert!(matches!(
+            select_snippet,
+            ActionInvocation::InsertQueryEditorText(_)
+        ));
+
+        let join_snippet = engine
+            .invoke(ActionId::InsertJoinSnippet, &context)
+            .expect("join snippet should be invokable");
+        assert!(matches!(
+            join_snippet,
+            ActionInvocation::InsertQueryEditorText(_)
+        ));
     }
 
     #[test]

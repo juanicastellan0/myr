@@ -30,6 +30,7 @@ Use these seeded values:
 - Port: `33306`
 - User: `root`
 - Database: `myr_bench`
+- Read-only (yes/no): `no`
 
 Steps:
 
@@ -40,6 +41,7 @@ Steps:
 Expected:
 
 - Runtime bar transitions `DB: [~] CONNECTING` to `DB: [+] CONNECTED`.
+- Runtime bar shows `Mode: RW` for this profile.
 - Status line reports successful connect with latency.
 - App switches to Schema Explorer automatically.
 
@@ -77,6 +79,100 @@ Expected:
 - Runtime bar shows query activity while running.
 - Results pane shows rows.
 - Status line reports `Query returned ... rows`.
+
+## Read-only Profile Guard
+
+Steps:
+
+1. Go to Connection Wizard (`F6`).
+2. Set `Read-only (yes/no)` to `yes`.
+3. Connect with `F5`.
+4. In Query Editor, run a write statement such as:
+
+```sql
+DELETE FROM `myr_bench`.`events` WHERE id = 1;
+```
+
+Expected:
+
+- Runtime bar shows `Mode: RO`.
+- Query is blocked before execution.
+- Status line reports `Blocked by read-only profile mode: write/DDL SQL is disabled`.
+
+## Query Editor Usability
+
+### Multiline, Cursor, and History
+
+Steps:
+
+1. Go to Query Editor and clear it (`Ctrl+U`).
+2. Type `SELECT id` then press `Ctrl+Enter` (or `Ctrl+J`) to insert a new line.
+3. Type `FROM \`myr_bench\`.\`events\`` and press `Ctrl+Enter` again.
+4. Type `LIMIT 5;` and use `Left`/`Right` to move the cursor.
+5. Press `Enter` to run the query.
+6. Return to Query Editor and use `Up`/`Down` to cycle query history.
+
+Expected:
+
+- Query editor renders multiple numbered lines.
+- Cursor movement updates line/column info in the editor footer.
+- History navigation restores previously executed SQL and can return to the draft query.
+
+### Snippet Insert Actions
+
+Steps:
+
+1. In Query Editor, open command palette (`Ctrl+P`).
+2. Search `snippet` and invoke `Insert SELECT snippet`.
+3. Open command palette again and invoke `Insert JOIN snippet`.
+
+Expected:
+
+- Snippets are inserted into the editor at the current cursor position.
+- App keeps focus on Query Editor and status line reports snippet insertion.
+
+## Guided Query Actions
+
+### Server-side Filter/Sort Builder
+
+Steps:
+
+1. Go to Schema Explorer and highlight a concrete database/table/column.
+2. Open command palette (`Ctrl+P`) and invoke `Build filter/sort query`.
+
+Expected:
+
+- Query Editor is populated with a generated query:
+  - `WHERE <column> LIKE '%search%'`
+  - `ORDER BY <column> ASC`
+  - `LIMIT 200`
+- App switches to Query Editor and reports `Query editor updated`.
+
+### EXPLAIN Preflight Action
+
+Steps:
+
+1. Put a normal `SELECT ...` query in Query Editor.
+2. Open command palette and invoke `Explain query`.
+
+Expected:
+
+- Action runs `EXPLAIN <query>` instead of replacing editor text.
+- Results pane displays the MySQL execution plan rows.
+
+## Results Search Mode
+
+Steps:
+
+1. Run any query that returns rows.
+2. Trigger search action (`Ctrl+P` -> `Search results` or action slot key shown in footer).
+3. Enter a search term and press `Enter`.
+4. Press `n` / `N` to cycle forward/backward matches.
+
+Expected:
+
+- Status line shows match count and active match index.
+- Result cursor jumps between matched rows.
 
 ## Resilience and Recovery
 

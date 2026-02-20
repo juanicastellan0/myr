@@ -31,7 +31,7 @@
 
 - [x] Packaging hardening
 - [x] Cross-platform validation
-- [ ] Documentation completion
+- [x] Documentation completion
 
 ## M5: Reliability and recovery
 
@@ -43,15 +43,15 @@
 ## M6: Query UX and guided exploration
 
 - [x] Implement real buffered-results search action (replace placeholder)
-- [ ] Upgrade query editor usability (multiline edit, movement, history, snippets)
-- [ ] Add server-side filter/sort builder from selected schema target
-- [ ] Add `EXPLAIN`/preflight action for heavy queries
+- [x] Upgrade query editor usability (multiline edit, movement, history, snippets)
+- [x] Add server-side filter/sort builder from selected schema target
+- [x] Add `EXPLAIN`/preflight action for heavy queries
 
 ## M7: Security and safety hardening
 
 - [ ] Optional secure password storage (OS keyring) in addition to env vars
 - [ ] Expanded TLS support (CA/cert/key + identity verification options)
-- [ ] Explicit read-only profile mode guard
+- [x] Explicit read-only profile mode guard
 - [ ] SQL audit trail with profile + timestamp metadata
 
 ## M8: Power-user workflows and scale

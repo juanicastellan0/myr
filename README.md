@@ -4,9 +4,9 @@ Terminal-first MySQL/MariaDB schema and data explorer focused on speed, guided a
 
 ## Status
 
-M0-M3 backlog milestones are implemented for explorer/navigation, guided actions, pagination,
-and benchmark/coverage gates. The detailed product backlog is in
-`fast-mysql-tui-explorer-backlog.md`.
+M0-M6 roadmap milestones are implemented for explorer/navigation, guided actions, reliability,
+and query UX. M7 is in progress with read-only profile mode guard implemented. Current and
+upcoming milestone tracking is in `docs/roadmap.md`.
 
 ## Workspace Layout
 
@@ -32,6 +32,11 @@ and benchmark/coverage gates. The detailed product backlog is in
 - Pane tabs with active-pane flash animation on tab/view changes
 - Context-aware next actions in footer + command palette
 - Safe mode confirmation for destructive SQL
+- Read-only profile mode guard (blocks write/DDL SQL when enabled)
+- Error panel with reconnect/retry guidance and auto-reconnect path for transient disconnects
+- Results search mode with buffered match navigation
+- Query editor upgrades: multiline editing, cursor movement, and query history recall
+- Guided query actions: server-side filter/sort builder, EXPLAIN preflight, and SQL snippets
 - Table preview pagination:
   - Keyset pagination for detected `id` / `*_id` keys
   - OFFSET fallback when keyset is unavailable

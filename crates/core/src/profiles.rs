@@ -24,6 +24,8 @@ pub struct ConnectionProfile {
     pub database: Option<String>,
     #[serde(default)]
     pub tls_mode: TlsMode,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl ConnectionProfile {
@@ -36,6 +38,7 @@ impl ConnectionProfile {
             user: user.into(),
             database: None,
             tls_mode: TlsMode::Prefer,
+            read_only: false,
         }
     }
 }

@@ -176,12 +176,33 @@ pub fn count_estimate_sql(target: &SqlTarget<'_>) -> Result<String, SqlGeneratio
     ))
 }
 
+pub fn filtered_sorted_preview_sql(
+    target: &SqlTarget<'_>,
+    column: &str,
+    limit: usize,
+) -> Result<String, SqlGenerationError> {
+    if column.trim().is_empty() {
+        return Err(SqlGenerationError::EmptyColumnName);
+    }
+
+    let table = qualified_table_sql(target);
+    let quoted_column = quote_identifier(column);
+
+    Ok(format!(
+        "SELECT * FROM {table} \
+         WHERE {quoted_column} LIKE '%search%' \
+         ORDER BY {quoted_column} ASC \
+         LIMIT {limit}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        count_estimate_sql, describe_table_sql, keyset_first_page_sql, keyset_page_sql,
-        offset_page_sql, preview_select_sql, quote_identifier, select_column_preview_sql,
-        show_create_table_sql, show_index_sql, PaginationDirection, SqlGenerationError, SqlTarget,
+        count_estimate_sql, describe_table_sql, filtered_sorted_preview_sql, keyset_first_page_sql,
+        keyset_page_sql, offset_page_sql, preview_select_sql, quote_identifier,
+        select_column_preview_sql, show_create_table_sql, show_index_sql, PaginationDirection,
+        SqlGenerationError, SqlTarget,
     };
 
     #[test]
@@ -230,6 +251,16 @@ mod tests {
         let target = SqlTarget::new(None, "users").expect("valid target");
         let err = count_estimate_sql(&target).expect_err("should require database");
         assert_eq!(err, SqlGenerationError::MissingDatabaseForEstimate);
+    }
+
+    #[test]
+    fn generates_filtered_sorted_preview_for_selected_column() {
+        let target = SqlTarget::new(Some("app"), "users").expect("valid target");
+        let sql = filtered_sorted_preview_sql(&target, "email", 200).expect("filter/sort sql");
+        assert_eq!(
+            sql,
+            "SELECT * FROM `app`.`users` WHERE `email` LIKE '%search%' ORDER BY `email` ASC LIMIT 200"
+        );
     }
 
     #[test]
