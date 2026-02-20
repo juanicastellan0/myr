@@ -650,8 +650,11 @@ impl TuiApp {
     ) {
         self.last_connection_latency = Some(connect_latency);
 
+        // Keep query execution and schema cache on separate pools so runtime-bound
+        // schema refreshes cannot invalidate the active query pool.
         let data_backend = MysqlDataBackend::from_profile(&profile);
-        let schema_cache = SchemaCacheService::new(data_backend.clone(), Duration::from_secs(10));
+        let schema_backend = MysqlDataBackend::from_profile(&profile);
+        let schema_cache = SchemaCacheService::new(schema_backend, Duration::from_secs(10));
 
         let mut active_database = profile.database.clone();
         if active_database.is_none() {
@@ -3073,6 +3076,49 @@ mod tests {
         app.query_editor_text =
             format!("SELECT id, user_id FROM `{database}`.`events` ORDER BY id LIMIT 5");
 
+        app.submit();
+        drive_query_worker_to_completion(&mut app);
+
+        assert!(
+            !app.query_running,
+            "query did not complete; status was: {}",
+            app.status_line
+        );
+        assert!(
+            !app.results.is_empty(),
+            "query returned no buffered rows; status was: {}",
+            app.status_line
+        );
+        assert!(
+            app.status_line.starts_with("Query returned"),
+            "expected successful query status, got: {}",
+            app.status_line
+        );
+    }
+
+    #[test]
+    fn mysql_query_path_survives_schema_cache_activity_when_enabled() {
+        if !mysql_tui_integration_enabled() {
+            return;
+        }
+
+        let database =
+            std::env::var("MYR_TEST_DB_DATABASE").unwrap_or_else(|_| "myr_bench".to_string());
+        let profile = mysql_integration_profile(Some(&database));
+
+        let mut app = app_in_pane(Pane::SchemaExplorer);
+        app.apply_connected_profile(
+            profile.clone(),
+            Duration::from_millis(1),
+            vec![database],
+            None,
+        );
+
+        app.pane = Pane::QueryEditor;
+        app.query_editor_text = format!(
+            "SELECT id, user_id FROM `{}`.`events` ORDER BY id LIMIT 5",
+            app.selection.database.as_deref().unwrap_or("myr_bench")
+        );
         app.submit();
         drive_query_worker_to_completion(&mut app);
 
