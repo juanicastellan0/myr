@@ -272,6 +272,8 @@ struct TuiApp {
     has_results: bool,
     result_columns: Vec<String>,
     results_cursor: usize,
+    results_search_mode: bool,
+    results_search_query: String,
     results: ResultsRingBuffer<QueryRow>,
     pagination_state: Option<PaginationState>,
     pending_page_transition: Option<PageTransition>,
@@ -334,6 +336,8 @@ impl Default for TuiApp {
                 "observed_at".to_string(),
             ],
             results_cursor: 0,
+            results_search_mode: false,
+            results_search_query: String::new(),
             results: ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY),
             pagination_state: None,
             pending_page_transition: None,
@@ -365,6 +369,36 @@ impl TuiApp {
                 "Exit pending. Press Ctrl+C to confirm, F10 to exit now, Esc to cancel."
                     .to_string();
             return;
+        }
+
+        if self.results_search_mode {
+            match msg {
+                Msg::InputChar(ch) => {
+                    self.results_search_query.push(ch);
+                    self.apply_results_search(false);
+                    return;
+                }
+                Msg::Backspace => {
+                    self.results_search_query.pop();
+                    self.apply_results_search(false);
+                    return;
+                }
+                Msg::ClearInput => {
+                    self.results_search_query.clear();
+                    self.apply_results_search(false);
+                    return;
+                }
+                Msg::Submit => {
+                    self.apply_results_search(true);
+                    return;
+                }
+                Msg::TogglePalette => {
+                    self.results_search_mode = false;
+                    self.status_line = "Results search canceled".to_string();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match msg {
@@ -745,6 +779,8 @@ impl TuiApp {
                 self.results = results;
                 self.has_results = !self.results.is_empty();
                 self.results_cursor = 0;
+                self.results_search_mode = false;
+                self.results_search_query.clear();
                 self.finalize_pagination_after_query();
                 self.status_line = if was_cancelled {
                     format!("Query cancelled after {rows_streamed} rows in {elapsed:.1?}")
@@ -755,6 +791,8 @@ impl TuiApp {
             QueryWorkerOutcome::Failure(error) => {
                 self.pending_page_transition = None;
                 self.has_results = !self.results.is_empty();
+                self.results_search_mode = false;
+                self.results_search_query.clear();
                 self.status_line = format!("Query failed: {error}");
             }
         }
@@ -1025,9 +1063,78 @@ impl TuiApp {
         );
     }
 
+    fn start_results_search(&mut self) {
+        if self.results.is_empty() {
+            self.results_search_mode = false;
+            self.status_line = "No buffered rows yet".to_string();
+            return;
+        }
+
+        self.set_active_pane(Pane::Results);
+        self.results_search_mode = true;
+        self.apply_results_search(false);
+    }
+
+    fn apply_results_search(&mut self, find_next: bool) {
+        let query = self.results_search_query.trim();
+        if query.is_empty() {
+            self.status_line = "Search results: type text, Enter next, Esc cancel".to_string();
+            return;
+        }
+
+        let row_count = self.results.len();
+        if row_count == 0 {
+            self.status_line = "No buffered rows yet".to_string();
+            return;
+        }
+
+        let start_index = if find_next {
+            (self.results_cursor + 1) % row_count
+        } else {
+            0
+        };
+
+        if let Some(index) = self.find_results_match_index(query, start_index) {
+            self.results_cursor = index;
+            self.status_line = format!(
+                "Search matched row {} / {} for `{query}` (Enter next, Esc cancel)",
+                index + 1,
+                row_count
+            );
+        } else {
+            self.status_line = format!("No match for `{query}` in {row_count} buffered rows");
+        }
+    }
+
+    fn find_results_match_index(&self, query: &str, start_index: usize) -> Option<usize> {
+        if self.results.is_empty() {
+            return None;
+        }
+
+        let needle = query.to_ascii_lowercase();
+        let row_count = self.results.len();
+        for offset in 0..row_count {
+            let index = (start_index + offset) % row_count;
+            let Some(row) = self.results.get(index) else {
+                continue;
+            };
+            if row
+                .values
+                .iter()
+                .any(|value| value.to_ascii_lowercase().contains(&needle))
+            {
+                return Some(index);
+            }
+        }
+
+        None
+    }
+
     fn populate_demo_results(&mut self) {
         self.results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
         self.results_cursor = 0;
+        self.results_search_mode = false;
+        self.results_search_query.clear();
         self.result_columns = vec![
             "id".to_string(),
             "value".to_string(),
@@ -1269,6 +1376,8 @@ impl TuiApp {
     fn start_query(&mut self, sql: String) {
         self.query_editor_text = sql;
         self.set_active_pane(Pane::Results);
+        self.results_search_mode = false;
+        self.results_search_query.clear();
         self.cancel_requested = false;
         self.has_results = false;
         self.query_cancellation = None;
@@ -1554,7 +1663,7 @@ impl TuiApp {
                 self.status_line = format!("Switched view to {}", self.pane_name());
             }
             ActionInvocation::SearchBufferedResults => {
-                self.status_line = "Search requested (placeholder)".to_string();
+                self.start_results_search();
             }
         }
     }
@@ -1626,6 +1735,9 @@ impl TuiApp {
         if self.pane != pane {
             self.pane = pane;
             self.pane_flash_ticks = PANE_FLASH_DURATION_TICKS;
+            if pane != Pane::Results {
+                self.results_search_mode = false;
+            }
         }
     }
 }
@@ -1989,11 +2101,24 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             let visible_limit = usize::from(chunks[1].height.saturating_sub(3)).max(1);
             let window_start = app.results_cursor.saturating_sub(visible_limit / 2);
             let rows = app.results.visible_rows(window_start, visible_limit);
+            let no_rows = rows.is_empty();
 
             let mut lines = vec![
                 Line::from("Results View (virtualized)"),
                 Line::from("Use arrows / hjkl to move cursor."),
             ];
+            if app.results_search_mode {
+                let query = if app.results_search_query.is_empty() {
+                    "(type to search)".to_string()
+                } else {
+                    app.results_search_query.clone()
+                };
+                lines.push(Line::from(format!(
+                    "Search: {query} (Enter next, Esc cancel)"
+                )));
+            } else {
+                lines.push(Line::from("Press 7 to search buffered rows."));
+            }
             if let Some(state) = &app.pagination_state {
                 let strategy = match &state.plan {
                     PaginationPlan::Keyset { key_column, .. } => {
@@ -2023,7 +2148,7 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 )));
             }
 
-            if lines.len() == 2 {
+            if no_rows {
                 lines.push(Line::from(if app.query_running {
                     "Query running... waiting for rows"
                 } else {
@@ -2919,11 +3044,61 @@ mod tests {
         );
         assert!(app.status_line.contains("Copy requested"));
 
+        app.populate_demo_results();
         app.apply_invocation(
             ActionId::SearchResults,
             ActionInvocation::SearchBufferedResults,
         );
-        assert_eq!(app.status_line, "Search requested (placeholder)");
+        assert!(app.results_search_mode);
+        assert!(
+            app.status_line.starts_with("Search results:"),
+            "unexpected search status: {}",
+            app.status_line
+        );
+    }
+
+    #[test]
+    fn search_action_reports_empty_buffer_without_entering_mode() {
+        let mut app = app_in_pane(Pane::Results);
+        app.apply_invocation(
+            ActionId::SearchResults,
+            ActionInvocation::SearchBufferedResults,
+        );
+
+        assert!(!app.results_search_mode);
+        assert_eq!(app.status_line, "No buffered rows yet");
+    }
+
+    #[test]
+    fn results_search_mode_finds_and_cycles_matches() {
+        let mut app = app_in_pane(Pane::Results);
+        app.populate_demo_results();
+        app.results_cursor = 10;
+
+        app.apply_invocation(
+            ActionId::SearchResults,
+            ActionInvocation::SearchBufferedResults,
+        );
+        assert!(app.results_search_mode);
+        assert_eq!(app.pane, Pane::Results);
+
+        app.handle(Msg::InputChar('v'));
+        app.handle(Msg::InputChar('a'));
+        app.handle(Msg::InputChar('l'));
+
+        assert_eq!(app.results_cursor, 0);
+        assert!(
+            app.status_line.contains("Search matched row"),
+            "unexpected search status: {}",
+            app.status_line
+        );
+
+        app.handle(Msg::Submit);
+        assert_eq!(app.results_cursor, 1);
+
+        app.handle(Msg::TogglePalette);
+        assert!(!app.results_search_mode);
+        assert_eq!(app.status_line, "Results search canceled");
     }
 
     #[test]
