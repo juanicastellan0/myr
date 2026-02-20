@@ -40,6 +40,9 @@ const FOOTER_ACTIONS_LIMIT: usize = 7;
 const RESULT_BUFFER_CAPACITY: usize = 2_000;
 const PREVIEW_PAGE_SIZE: usize = 200;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
+const QUERY_RETRY_LIMIT: u8 = 1;
+const AUTO_RECONNECT_LIMIT: u8 = 2;
 const PANE_FLASH_DURATION_TICKS: u8 = 8;
 
 const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
@@ -190,6 +193,26 @@ enum Msg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectIntent {
+    Manual,
+    AutoReconnect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorKind {
+    Connection,
+    Query,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ErrorPanel {
+    kind: ErrorKind,
+    title: String,
+    summary: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PageTransition {
     Reset,
     Next,
@@ -279,9 +302,18 @@ struct TuiApp {
     pending_page_transition: Option<PageTransition>,
     cancel_requested: bool,
     connect_requested: bool,
+    connect_intent: ConnectIntent,
     connect_result_rx: Option<Receiver<ConnectWorkerOutcome>>,
     query_result_rx: Option<Receiver<QueryWorkerOutcome>>,
     query_cancellation: Option<CancellationToken>,
+    active_connection_profile: Option<ConnectionProfile>,
+    last_connect_profile: Option<ConnectionProfile>,
+    pending_retry_query: Option<String>,
+    reconnect_attempts: u8,
+    query_retry_attempts: u8,
+    inflight_query_sql: Option<String>,
+    last_failed_query: Option<String>,
+    error_panel: Option<ErrorPanel>,
     loading_tick: usize,
     pane_flash_ticks: u8,
     exit_confirmation: bool,
@@ -343,9 +375,18 @@ impl Default for TuiApp {
             pending_page_transition: None,
             cancel_requested: false,
             connect_requested: false,
+            connect_intent: ConnectIntent::Manual,
             connect_result_rx: None,
             query_result_rx: None,
             query_cancellation: None,
+            active_connection_profile: None,
+            last_connect_profile: None,
+            pending_retry_query: None,
+            reconnect_attempts: 0,
+            query_retry_attempts: 0,
+            inflight_query_sql: None,
+            last_failed_query: None,
+            error_panel: None,
             loading_tick: 0,
             pane_flash_ticks: 0,
             exit_confirmation: false,
@@ -368,6 +409,11 @@ impl TuiApp {
             self.status_line =
                 "Exit pending. Press Ctrl+C to confirm, F10 to exit now, Esc to cancel."
                     .to_string();
+            return;
+        }
+
+        if self.error_panel.is_some() {
+            self.handle_error_panel_input(msg);
             return;
         }
 
@@ -500,6 +546,35 @@ impl TuiApp {
         }
     }
 
+    fn handle_error_panel_input(&mut self, msg: Msg) {
+        match msg {
+            Msg::Tick => self.on_tick(),
+            Msg::TogglePalette => {
+                self.error_panel = None;
+                self.status_line = "Error panel dismissed".to_string();
+            }
+            Msg::InvokeActionSlot(0) | Msg::Submit => {
+                self.run_primary_error_action();
+            }
+            Msg::Connect => {
+                self.reconnect_from_error_panel();
+            }
+            Msg::GoConnectionWizard => {
+                self.error_panel = None;
+                self.set_active_pane(Pane::ConnectionWizard);
+                self.status_line = "Returned to Connection Wizard".to_string();
+            }
+            Msg::Quit => {
+                self.should_quit = true;
+            }
+            _ => {
+                self.status_line =
+                    "Error panel active: 1 primary action | F5 reconnect | F6 wizard | Esc close"
+                        .to_string();
+            }
+        }
+    }
+
     fn on_tick(&mut self) {
         self.loading_tick = self.loading_tick.wrapping_add(1);
         self.pane_flash_ticks = self.pane_flash_ticks.saturating_sub(1);
@@ -510,6 +585,9 @@ impl TuiApp {
             if self.query_ticks_remaining == 0 {
                 self.query_running = false;
                 self.populate_demo_results();
+                self.query_retry_attempts = 0;
+                self.inflight_query_sql = None;
+                self.last_failed_query = None;
                 self.finalize_pagination_after_query();
                 self.status_line = "Query completed".to_string();
             } else {
@@ -519,7 +597,11 @@ impl TuiApp {
 
         if self.connect_requested {
             let spinner = spinner_char(self.loading_tick);
-            self.status_line = format!("Connecting... {spinner}");
+            self.status_line = if self.connect_intent == ConnectIntent::AutoReconnect {
+                format!("Reconnecting... {spinner}")
+            } else {
+                format!("Connecting... {spinner}")
+            };
         } else if self.query_running && self.query_result_rx.is_some() {
             let spinner = spinner_char(self.loading_tick);
             self.status_line = if self.cancel_requested {
@@ -607,13 +689,32 @@ impl TuiApp {
             }
         };
 
+        self.start_connect_with_profile(profile, ConnectIntent::Manual);
+    }
+
+    fn start_connect_with_profile(&mut self, profile: ConnectionProfile, intent: ConnectIntent) {
+        if intent == ConnectIntent::Manual {
+            self.reconnect_attempts = 0;
+        }
+        self.error_panel = None;
         let (tx, rx) = mpsc::channel();
         self.connect_result_rx = Some(rx);
         self.connect_requested = true;
-        self.status_line = format!(
-            "Connecting to {}:{} as {}...",
-            profile.host, profile.port, profile.user
-        );
+        self.connect_intent = intent;
+        self.last_connect_profile = Some(profile.clone());
+        self.status_line = if intent == ConnectIntent::AutoReconnect {
+            format!(
+                "Auto-reconnect {}/{} for `{}`...",
+                self.reconnect_attempts.max(1),
+                AUTO_RECONNECT_LIMIT,
+                profile.name
+            )
+        } else {
+            format!(
+                "Connecting to {}:{} as {}...",
+                profile.host, profile.port, profile.user
+            )
+        };
 
         let _connect_worker = thread::spawn(move || {
             let _ = tx.send(run_connect_worker(profile));
@@ -657,8 +758,10 @@ impl TuiApp {
             return;
         };
 
+        let intent = self.connect_intent;
         self.connect_result_rx = None;
         self.connect_requested = false;
+        self.connect_intent = ConnectIntent::Manual;
 
         match outcome {
             ConnectWorkerOutcome::Success {
@@ -667,10 +770,41 @@ impl TuiApp {
                 databases,
                 warning,
             } => {
+                self.reconnect_attempts = 0;
                 self.apply_connected_profile(profile, connect_latency, databases, warning);
+                self.error_panel = None;
+                if intent == ConnectIntent::AutoReconnect {
+                    if let Some(sql) = self.pending_retry_query.take() {
+                        self.start_query(sql);
+                    } else {
+                        self.status_line = "Auto-reconnect succeeded".to_string();
+                    }
+                }
             }
             ConnectWorkerOutcome::Failure(error) => {
+                if intent == ConnectIntent::AutoReconnect
+                    && self.reconnect_attempts < AUTO_RECONNECT_LIMIT
+                {
+                    if let Some(profile) = self
+                        .active_connection_profile
+                        .clone()
+                        .or_else(|| self.last_connect_profile.clone())
+                    {
+                        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+                        self.start_connect_with_profile(profile, ConnectIntent::AutoReconnect);
+                        return;
+                    }
+                }
+
+                self.pending_retry_query = None;
+                self.reconnect_attempts = 0;
                 self.status_line = format!("Connect failed: {error}");
+                let summary = if intent == ConnectIntent::AutoReconnect {
+                    "Auto-reconnect attempts were exhausted".to_string()
+                } else {
+                    "Connection attempt failed".to_string()
+                };
+                self.open_error_panel(ErrorKind::Connection, "Connection Error", summary, error);
             }
         }
     }
@@ -695,6 +829,8 @@ impl TuiApp {
             active_database = databases.first().cloned();
         }
 
+        self.active_connection_profile = Some(profile.clone());
+        self.last_connect_profile = Some(profile.clone());
         self.data_backend = Some(data_backend);
         self.schema_cache = Some(schema_cache);
         self.schema_databases = databases;
@@ -781,6 +917,10 @@ impl TuiApp {
                 self.results_cursor = 0;
                 self.results_search_mode = false;
                 self.results_search_query.clear();
+                self.query_retry_attempts = 0;
+                self.reconnect_attempts = 0;
+                self.inflight_query_sql = None;
+                self.last_failed_query = None;
                 self.finalize_pagination_after_query();
                 self.status_line = if was_cancelled {
                     format!("Query cancelled after {rows_streamed} rows in {elapsed:.1?}")
@@ -793,7 +933,64 @@ impl TuiApp {
                 self.has_results = !self.results.is_empty();
                 self.results_search_mode = false;
                 self.results_search_query.clear();
+                let query_sql = self
+                    .inflight_query_sql
+                    .clone()
+                    .or_else(|| (!self.query_editor_text.trim().is_empty()).then(|| self.query_editor_text.clone()));
+                let transient = is_transient_query_error(&error);
+                let connection_loss = is_connection_lost_error(&error);
+
+                if transient
+                    && !self.cancel_requested
+                    && self.query_retry_attempts < QUERY_RETRY_LIMIT
+                {
+                    if let Some(sql) = query_sql.clone() {
+                        self.query_retry_attempts = self.query_retry_attempts.saturating_add(1);
+                        self.status_line = format!(
+                            "Transient query failure; retrying ({}/{})...",
+                            self.query_retry_attempts,
+                            QUERY_RETRY_LIMIT
+                        );
+                        self.start_query_internal(sql, true);
+                        self.cancel_requested = false;
+                        return;
+                    }
+                }
+
+                if connection_loss
+                    && !self.cancel_requested
+                    && self.reconnect_attempts < AUTO_RECONNECT_LIMIT
+                {
+                    if let Some(profile) = self
+                        .active_connection_profile
+                        .clone()
+                        .or_else(|| self.last_connect_profile.clone())
+                    {
+                        self.pending_retry_query = query_sql.clone();
+                        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+                        self.start_connect_with_profile(profile, ConnectIntent::AutoReconnect);
+                        self.status_line = format!(
+                            "Connection dropped; reconnecting ({}/{})...",
+                            self.reconnect_attempts,
+                            AUTO_RECONNECT_LIMIT
+                        );
+                        self.cancel_requested = false;
+                        return;
+                    }
+                }
+
+                self.query_retry_attempts = 0;
+                self.reconnect_attempts = 0;
+                self.inflight_query_sql = None;
+                self.last_failed_query = query_sql;
+                self.pending_retry_query = None;
                 self.status_line = format!("Query failed: {error}");
+                self.open_error_panel(
+                    ErrorKind::Query,
+                    "Query Error",
+                    "Query execution failed".to_string(),
+                    error,
+                );
             }
         }
 
@@ -1374,10 +1571,22 @@ impl TuiApp {
     }
 
     fn start_query(&mut self, sql: String) {
+        self.start_query_internal(sql, false);
+    }
+
+    fn start_query_internal(&mut self, sql: String, retrying: bool) {
+        if !retrying {
+            self.query_retry_attempts = 0;
+            self.last_failed_query = None;
+            self.pending_retry_query = None;
+            self.reconnect_attempts = 0;
+        }
+        self.inflight_query_sql = Some(sql.clone());
         self.query_editor_text = sql;
         self.set_active_pane(Pane::Results);
         self.results_search_mode = false;
         self.results_search_query.clear();
+        self.error_panel = None;
         self.cancel_requested = false;
         self.has_results = false;
         self.query_cancellation = None;
@@ -1695,6 +1904,65 @@ impl TuiApp {
         }
     }
 
+    fn open_error_panel(
+        &mut self,
+        kind: ErrorKind,
+        title: impl Into<String>,
+        summary: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        self.error_panel = Some(ErrorPanel {
+            kind,
+            title: title.into(),
+            summary: summary.into(),
+            detail: detail.into(),
+        });
+    }
+
+    fn run_primary_error_action(&mut self) {
+        let Some(panel) = self.error_panel.as_ref().cloned() else {
+            return;
+        };
+
+        if panel.kind == ErrorKind::Query {
+            if let Some(sql) = self.last_failed_query.clone() {
+                self.error_panel = None;
+                self.start_query(sql);
+                return;
+            }
+        }
+
+        self.reconnect_from_error_panel();
+    }
+
+    fn reconnect_from_error_panel(&mut self) {
+        if self.connect_requested {
+            self.status_line = "Already connecting...".to_string();
+            return;
+        }
+
+        let profile = self
+            .active_connection_profile
+            .clone()
+            .or_else(|| self.last_connect_profile.clone())
+            .or_else(|| self.wizard_profile().ok());
+
+        let Some(profile) = profile else {
+            self.status_line = "Reconnect unavailable: provide a valid connection profile".to_string();
+            return;
+        };
+
+        self.error_panel = None;
+        self.reconnect_attempts = 0;
+        self.start_connect_with_profile(profile, ConnectIntent::Manual);
+    }
+
+    fn can_reconnect_from_error_panel(&self) -> bool {
+        self.active_connection_profile.is_some()
+            || self.last_connect_profile.is_some()
+            || self.wizard_profile().is_ok()
+    }
+
     fn pane_tab_index(&self) -> usize {
         match self.pane {
             Pane::ConnectionWizard => 0,
@@ -1714,7 +1982,11 @@ impl TuiApp {
 
     fn connection_state_label(&self) -> &'static str {
         if self.connect_requested {
-            "CONNECTING"
+            if self.connect_intent == ConnectIntent::AutoReconnect {
+                "RECONNECTING"
+            } else {
+                "CONNECTING"
+            }
         } else if self.data_backend.is_some() {
             "CONNECTED"
         } else {
@@ -1835,7 +2107,10 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         .last_connection_latency
         .map_or("n/a".to_string(), |latency| format!("{latency:.1?}"));
     let heartbeat = spinner_char(app.loading_tick);
-    let loading_text = if app.connect_requested {
+    let loading_text = if app.connect_requested && app.connect_intent == ConnectIntent::AutoReconnect
+    {
+        "reconnecting"
+    } else if app.connect_requested {
         "connecting"
     } else if app.query_running && app.cancel_requested {
         "cancelling query"
@@ -1861,7 +2136,7 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 Color::Cyan
             }
         }
-        "CONNECTING" => Color::Yellow,
+        "CONNECTING" | "RECONNECTING" => Color::Yellow,
         _ => Color::Red,
     };
 
@@ -2205,6 +2480,9 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     if app.exit_confirmation {
         render_exit_popup(frame);
     }
+    if app.error_panel.is_some() {
+        render_error_popup(frame, app);
+    }
 }
 
 fn render_help_popup(frame: &mut Frame<'_>) {
@@ -2243,6 +2521,44 @@ fn render_exit_popup(frame: &mut Frame<'_>) {
     .block(Block::default().borders(Borders::ALL).title("Confirm Exit"))
     .alignment(Alignment::Center);
     frame.render_widget(content, area);
+}
+
+fn render_error_popup(frame: &mut Frame<'_>, app: &TuiApp) {
+    let Some(panel) = app.error_panel.as_ref() else {
+        return;
+    };
+
+    let area = centered_rect(76, 50, frame.area());
+    frame.render_widget(Clear, area);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            panel.summary.as_str(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(format!("Detail: {}", panel.detail)),
+        Line::from(""),
+        Line::from("Recovery actions:"),
+    ];
+
+    if panel.kind == ErrorKind::Query && app.last_failed_query.is_some() {
+        lines.push(Line::from("1 or Enter: retry last query"));
+    }
+    if app.can_reconnect_from_error_panel() {
+        lines.push(Line::from("F5: reconnect now"));
+    }
+    lines.push(Line::from("F6: open connection wizard"));
+    lines.push(Line::from("Esc: dismiss panel"));
+
+    let error_panel = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(panel.title.as_str()),
+    );
+    frame.render_widget(error_panel, area);
 }
 
 fn render_palette_popup(frame: &mut Frame<'_>, app: &TuiApp) {
@@ -2320,7 +2636,7 @@ fn pulse_char(tick: usize) -> char {
 fn connection_badge_and_marker(connection_state: &str, tick: usize) -> (&'static str, char) {
     match connection_state {
         "CONNECTED" => ("[+]", pulse_char(tick)),
-        "CONNECTING" => ("[~]", spinner_char(tick)),
+        "CONNECTING" | "RECONNECTING" => ("[~]", spinner_char(tick)),
         _ => ("[x]", if tick % 2 == 0 { '-' } else { ' ' }),
     }
 }
@@ -2413,15 +2729,61 @@ fn run_query_worker(
 
     let runner = QueryRunner::new(backend);
     let mut results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
-    match runtime.block_on(runner.execute_streaming(&sql, &mut results, &cancellation)) {
-        Ok(summary) => QueryWorkerOutcome::Success {
+    match runtime.block_on(async {
+        tokio::time::timeout(
+            QUERY_TIMEOUT,
+            runner.execute_streaming(&sql, &mut results, &cancellation),
+        )
+        .await
+    }) {
+        Ok(Ok(summary)) => QueryWorkerOutcome::Success {
             results,
             rows_streamed: summary.rows_streamed,
             was_cancelled: summary.was_cancelled,
             elapsed: summary.elapsed,
         },
-        Err(error) => QueryWorkerOutcome::Failure(error.to_string()),
+        Ok(Err(error)) => QueryWorkerOutcome::Failure(error.to_string()),
+        Err(_) => {
+            cancellation.cancel();
+            QueryWorkerOutcome::Failure(format!("query timed out after {:.1?}", QUERY_TIMEOUT))
+        }
     }
+}
+
+fn is_transient_query_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "timed out",
+        "timeout",
+        "temporary",
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "broken pipe",
+        "server has gone away",
+        "lost connection",
+        "pool was disconnect",
+        "i/o error",
+        "io error",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn is_connection_lost_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "pool was disconnect",
+        "server has gone away",
+        "lost connection",
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "broken pipe",
+        "not connected",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 fn quote_identifier(identifier: &str) -> String {
@@ -2551,9 +2913,11 @@ mod tests {
 
     use super::{
         candidate_key_column, centered_rect, connection_badge_and_marker, extract_key_bounds,
-        map_key_event, quote_identifier, render, suggest_limit_in_editor, ActionId,
-        ActionInvocation, AppView, DirectionKey, Msg, MysqlDataBackend, PaginationPlan, Pane,
-        QueryRow, ResultsRingBuffer, SchemaLane, TuiApp, WizardField, QUERY_DURATION_TICKS,
+        is_connection_lost_error, is_transient_query_error, map_key_event, quote_identifier,
+        render, suggest_limit_in_editor, ActionId, ActionInvocation, AppView, ConnectIntent,
+        DirectionKey, ErrorKind, Msg, MysqlDataBackend, PaginationPlan, Pane, QueryRow,
+        QueryWorkerOutcome, ResultsRingBuffer, SchemaLane, TuiApp, WizardField,
+        QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
     };
 
     fn app_in_pane(pane: Pane) -> TuiApp {
@@ -2651,6 +3015,7 @@ mod tests {
     fn connection_badges_reflect_state() {
         assert_eq!(connection_badge_and_marker("CONNECTED", 0).0, "[+]");
         assert_eq!(connection_badge_and_marker("CONNECTING", 0).0, "[~]");
+        assert_eq!(connection_badge_and_marker("RECONNECTING", 0).0, "[~]");
         assert_eq!(connection_badge_and_marker("DISCONNECTED", 0).0, "[x]");
     }
 
@@ -2666,6 +3031,8 @@ mod tests {
 
         app.connect_requested = true;
         assert_eq!(app.connection_state_label(), "CONNECTING");
+        app.connect_intent = ConnectIntent::AutoReconnect;
+        assert_eq!(app.connection_state_label(), "RECONNECTING");
 
         app.connect_requested = false;
         let profile = ConnectionProfile::new(
@@ -2675,6 +3042,15 @@ mod tests {
         );
         app.data_backend = Some(MysqlDataBackend::from_profile(&profile));
         assert_eq!(app.connection_state_label(), "CONNECTED");
+    }
+
+    #[test]
+    fn query_error_classification_detects_transient_and_disconnect_signals() {
+        assert!(is_transient_query_error("query timed out after 20s"));
+        assert!(is_transient_query_error("Connection reset by peer"));
+        assert!(is_connection_lost_error("Pool was disconnected"));
+        assert!(is_connection_lost_error("server has gone away"));
+        assert!(!is_connection_lost_error("syntax error near `FROM`"));
     }
 
     #[test]
@@ -2877,6 +3253,71 @@ mod tests {
 
         drive_demo_query_to_completion(&mut app);
         assert!(app.has_results);
+    }
+
+    #[test]
+    fn query_failure_retries_once_when_transient() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+        app.query_running = true;
+        app.inflight_query_sql = Some("SELECT 1".to_string());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.query_result_rx = Some(rx);
+        tx.send(QueryWorkerOutcome::Failure(
+            "connection reset by peer".to_string(),
+        ))
+        .expect("send test query failure");
+
+        app.poll_query_result();
+
+        assert!(app.query_running);
+        assert_eq!(app.query_retry_attempts, 1);
+        assert!(app.status_line.starts_with("Running query"));
+    }
+
+    #[test]
+    fn query_failure_starts_auto_reconnect_when_connection_is_lost() {
+        let mut app = app_in_pane(Pane::QueryEditor);
+        let profile = ConnectionProfile::new(
+            "local".to_string(),
+            "127.0.0.1".to_string(),
+            "root".to_string(),
+        );
+        app.data_backend = Some(MysqlDataBackend::from_profile(&profile));
+        app.active_connection_profile = Some(profile.clone());
+        app.last_connect_profile = Some(profile);
+        app.query_running = true;
+        app.query_retry_attempts = QUERY_RETRY_LIMIT;
+        app.inflight_query_sql = Some("SELECT 1".to_string());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.query_result_rx = Some(rx);
+        tx.send(QueryWorkerOutcome::Failure("Pool was disconnected".to_string()))
+            .expect("send disconnect failure");
+
+        app.poll_query_result();
+
+        assert!(app.connect_requested);
+        assert_eq!(app.connect_intent, ConnectIntent::AutoReconnect);
+        assert_eq!(app.pending_retry_query.as_deref(), Some("SELECT 1"));
+    }
+
+    #[test]
+    fn error_panel_primary_action_retries_last_failed_query() {
+        let mut app = app_in_pane(Pane::Results);
+        app.last_failed_query = Some("SELECT 1".to_string());
+        app.open_error_panel(
+            ErrorKind::Query,
+            "Query Error",
+            "Query failed".to_string(),
+            "connection lost".to_string(),
+        );
+
+        app.handle(Msg::InvokeActionSlot(0));
+
+        assert!(app.error_panel.is_none());
+        assert!(app.query_running);
+        assert_eq!(app.pane, Pane::Results);
     }
 
     #[test]
@@ -3146,6 +3587,15 @@ mod tests {
         let mut exit_confirm = app_in_pane(Pane::Results);
         exit_confirm.exit_confirmation = true;
         render_once(&exit_confirm);
+
+        let mut error_popup = app_in_pane(Pane::Results);
+        error_popup.open_error_panel(
+            ErrorKind::Connection,
+            "Connection Error",
+            "connect failed".to_string(),
+            "connection refused".to_string(),
+        );
+        render_once(&error_popup);
     }
 
     #[test]
@@ -3358,6 +3808,22 @@ mod tests {
         app.handle(Msg::TogglePalette);
         assert!(!app.exit_confirmation);
         assert_eq!(app.status_line, "Exit canceled");
+    }
+
+    #[test]
+    fn esc_path_dismisses_error_panel() {
+        let mut app = app_in_pane(Pane::Results);
+        app.open_error_panel(
+            ErrorKind::Query,
+            "Query Error",
+            "Query failed".to_string(),
+            "network".to_string(),
+        );
+
+        app.handle(Msg::TogglePalette);
+
+        assert!(app.error_panel.is_none());
+        assert_eq!(app.status_line, "Error panel dismissed");
     }
 
     #[test]

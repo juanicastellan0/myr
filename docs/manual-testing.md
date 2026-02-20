@@ -78,6 +78,44 @@ Expected:
 - Results pane shows rows.
 - Status line reports `Query returned ... rows`.
 
+## Resilience and Recovery
+
+### Auto-Reconnect State Flow
+
+Steps:
+
+1. Start a query in Query Editor.
+2. While query runs, stop the DB container temporarily:
+
+```bash
+docker stop myr-bench-mysql
+```
+
+3. Watch the runtime bar and status line.
+
+Expected:
+
+- Runtime DB state transitions to `RECONNECTING`.
+- Status line indicates reconnect attempts.
+- If reconnect succeeds after DB is back, query is retried automatically.
+
+### Error Panel and Guided Recovery
+
+Steps:
+
+1. Trigger a connection/query failure (for example by using a wrong port or stopping DB).
+2. Observe the error panel popup.
+3. Use recovery shortcuts:
+   - `1` or `Enter`: run primary action
+   - `F5`: reconnect now
+   - `F6`: open Connection Wizard
+   - `Esc`: dismiss panel
+
+Expected:
+
+- Error panel includes failure detail and recovery options.
+- Recovery shortcuts perform the mapped actions and update status line.
+
 ## Exit Paths
 
 Steps and expected behavior:

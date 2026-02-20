@@ -36,13 +36,13 @@
 ## M5: Reliability and recovery
 
 - [x] Fix connection/query lifecycle regressions (`Pool was disconnect`) with regression tests
-- [ ] Auto-reconnect flow with explicit UI state transitions
-- [ ] Query timeout + retry policy for transient network failures
-- [ ] Structured error panel with actionable recovery guidance
+- [x] Auto-reconnect flow with explicit UI state transitions
+- [x] Query timeout + retry policy for transient network failures
+- [x] Structured error panel with actionable recovery guidance
 
 ## M6: Query UX and guided exploration
 
-- [ ] Implement real buffered-results search action (replace placeholder)
+- [x] Implement real buffered-results search action (replace placeholder)
 - [ ] Upgrade query editor usability (multiline edit, movement, history, snippets)
 - [ ] Add server-side filter/sort builder from selected schema target
 - [ ] Add `EXPLAIN`/preflight action for heavy queries
