@@ -360,7 +360,7 @@ impl Default for TuiApp {
         Self {
             actions: ActionsEngine::new(),
             pane: Pane::ConnectionWizard,
-            wizard_form: ConnectionWizardForm::default(),
+            wizard_form: startup_wizard_form(),
             connected_profile: None,
             last_connection_latency: None,
             data_backend: None,
@@ -441,6 +441,53 @@ impl Default for TuiApp {
             },
         }
     }
+}
+
+fn wizard_form_from_profile(profile: &ConnectionProfile) -> ConnectionWizardForm {
+    ConnectionWizardForm {
+        profile_name: profile.name.clone(),
+        host: profile.host.clone(),
+        port: profile.port.to_string(),
+        user: profile.user.clone(),
+        password_source: match profile.password_source {
+            PasswordSource::EnvVar => "env".to_string(),
+            PasswordSource::Keyring => "keyring".to_string(),
+        },
+        database: profile.database.clone().unwrap_or_default(),
+        tls_mode: match profile.tls_mode {
+            TlsMode::Disabled => "disabled".to_string(),
+            TlsMode::Prefer => "prefer".to_string(),
+            TlsMode::Require => "require".to_string(),
+            TlsMode::VerifyIdentity => "verify_identity".to_string(),
+        },
+        read_only: if profile.read_only {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        },
+        active_field: WizardField::ProfileName,
+        editing: false,
+        edit_buffer: String::new(),
+    }
+}
+
+#[cfg(test)]
+fn startup_wizard_form() -> ConnectionWizardForm {
+    ConnectionWizardForm::default()
+}
+
+#[cfg(not(test))]
+fn startup_wizard_form() -> ConnectionWizardForm {
+    let default_form = ConnectionWizardForm::default();
+    let Ok(store) = FileProfilesStore::load_default() else {
+        return default_form;
+    };
+
+    let profile = store
+        .profile(default_form.profile_name.as_str())
+        .or_else(|| store.profiles().first());
+
+    profile.map_or(default_form, wizard_form_from_profile)
 }
 
 impl TuiApp {
@@ -907,21 +954,7 @@ impl TuiApp {
 
         self.active_connection_profile = Some(profile.clone());
         self.last_connect_profile = Some(profile.clone());
-        self.wizard_form.password_source = match profile.password_source {
-            PasswordSource::EnvVar => "env".to_string(),
-            PasswordSource::Keyring => "keyring".to_string(),
-        };
-        self.wizard_form.tls_mode = match profile.tls_mode {
-            TlsMode::Disabled => "disabled".to_string(),
-            TlsMode::Prefer => "prefer".to_string(),
-            TlsMode::Require => "require".to_string(),
-            TlsMode::VerifyIdentity => "verify_identity".to_string(),
-        };
-        self.wizard_form.read_only = if profile.read_only {
-            "yes".to_string()
-        } else {
-            "no".to_string()
-        };
+        self.wizard_form = wizard_form_from_profile(&profile);
         self.data_backend = Some(data_backend);
         self.schema_cache = Some(schema_cache);
         self.schema_databases = databases;
@@ -1579,8 +1612,8 @@ impl TuiApp {
     fn save_current_bookmark(&mut self) {
         let query_trimmed = self.query_editor_text.trim();
         if self.selection.table.is_none() && query_trimmed.is_empty() {
-            self.status_line = "Nothing to bookmark yet (select a table or write a query)"
-                .to_string();
+            self.status_line =
+                "Nothing to bookmark yet (select a table or write a query)".to_string();
             return;
         }
 
@@ -1657,7 +1690,11 @@ impl TuiApp {
         }
 
         if let Some(table) = bookmark.table.as_deref() {
-            if let Some(index) = self.schema_tables.iter().position(|candidate| candidate == table) {
+            if let Some(index) = self
+                .schema_tables
+                .iter()
+                .position(|candidate| candidate == table)
+            {
                 self.selected_table_index = index;
             }
             self.selection.table = Some(table.to_string());
@@ -1675,7 +1712,11 @@ impl TuiApp {
             self.selection.column = Some(column.to_string());
         }
 
-        if let Some(query) = bookmark.query.as_deref().filter(|query| !query.trim().is_empty()) {
+        if let Some(query) = bookmark
+            .query
+            .as_deref()
+            .filter(|query| !query.trim().is_empty())
+        {
             self.query_editor_text = query.to_string();
             self.query_cursor = self.query_editor_text.len();
             self.query_history_index = None;
@@ -2856,6 +2897,7 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         .block(Block::default().borders(Borders::ALL).title(tabs_title));
     frame.render_widget(tabs, top_chunks[1]);
 
+    let mut query_cursor_screen_position: Option<(u16, u16)> = None;
     let body_text = match app.pane {
         Pane::ConnectionWizard => {
             let fields = [
@@ -2937,96 +2979,106 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             lines
         }
         Pane::SchemaExplorer => {
+            let section_window = usize::from(chunks[1].height.saturating_sub(10)).clamp(3, 8);
             let mut lines = vec![
                 Line::from("Schema Explorer"),
-                Line::from("Left/Right switches focus lane, Up/Down changes selection."),
+                Line::from("Left/Right: lane focus | Up/Down: selection | 1: preview table"),
                 Line::from(format!(
-                    "Focus lane: {} (press 1 for preview action).",
-                    app.schema_lane.label()
+                    "Focus lane: {} | Active DB: {}",
+                    app.schema_lane.label(),
+                    app.active_database.as_deref().unwrap_or("-")
                 )),
                 Line::from(""),
             ];
 
-            if app.schema_databases.is_empty() {
-                lines.push(Line::from("Databases: (none loaded)"));
+            let database_position = if app.schema_databases.is_empty() {
+                "0/0".to_string()
             } else {
-                lines.push(Line::from("Databases:"));
-                for (index, database) in app.schema_databases.iter().enumerate() {
-                    let marker = if app.schema_lane == SchemaLane::Databases
-                        && index == app.selected_database_index
-                    {
-                        ">"
-                    } else {
-                        " "
-                    };
-                    lines.push(Line::from(format!("{marker} {database}")));
-                }
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(format!(
-                "Active DB: {}",
-                app.active_database.as_deref().unwrap_or("-")
+                format!(
+                    "{}/{}",
+                    app.selected_database_index.saturating_add(1),
+                    app.schema_databases.len()
+                )
+            };
+            lines.push(Line::from(Span::styled(
+                format!("Databases ({database_position})"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
-            lines.push(Line::from("Tables:"));
-
-            for (index, table) in app.schema_tables.iter().enumerate() {
-                let marker =
-                    if app.schema_lane == SchemaLane::Tables && index == app.selected_table_index {
-                        ">"
-                    } else {
-                        " "
-                    };
-                lines.push(Line::from(format!("{marker} {table}")));
-            }
-
-            if app.schema_tables.is_empty() {
-                lines.push(Line::from("  (none)"));
-            }
+            append_windowed_schema_items(
+                &mut lines,
+                &app.schema_databases,
+                app.selected_database_index,
+                app.schema_lane == SchemaLane::Databases,
+                section_window,
+            );
 
             lines.push(Line::from(""));
-            lines.push(Line::from("Columns:"));
-            for (index, column) in app.schema_columns.iter().enumerate() {
-                let marker = if app.schema_lane == SchemaLane::Columns
-                    && index == app.selected_column_index
-                {
-                    ">"
-                } else {
-                    " "
-                };
-                lines.push(Line::from(format!("{marker} {column}")));
-            }
-            if app.schema_columns.is_empty() {
-                lines.push(Line::from("  (none)"));
-            }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(
-                "Relationships (use action `Jump to related table` to follow):",
-            ));
-            if app.schema_relationships.is_empty() {
-                lines.push(Line::from("  (none detected)"));
+            let table_position = if app.schema_tables.is_empty() {
+                "0/0".to_string()
             } else {
-                for (index, relationship) in app.schema_relationships.iter().enumerate() {
-                    let marker = if index == app.selected_relationship_index {
-                        ">"
-                    } else {
-                        " "
-                    };
-                    let direction = relationship_direction_label(relationship.direction);
-                    lines.push(Line::from(format!(
-                        "{marker} {direction} {}.{} ({}, {} -> {})",
-                        relationship.related_database,
-                        relationship.related_table,
-                        relationship.constraint_name,
-                        relationship.source_column,
-                        relationship.related_column
-                    )));
-                }
-            }
+                format!(
+                    "{}/{}",
+                    app.selected_table_index.saturating_add(1),
+                    app.schema_tables.len()
+                )
+            };
+            lines.push(Line::from(Span::styled(
+                format!("Tables ({table_position})"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            append_windowed_schema_items(
+                &mut lines,
+                &app.schema_tables,
+                app.selected_table_index,
+                app.schema_lane == SchemaLane::Tables,
+                section_window,
+            );
+
+            lines.push(Line::from(""));
+            let column_position = if app.schema_columns.is_empty() {
+                "0/0".to_string()
+            } else {
+                format!(
+                    "{}/{}",
+                    app.selected_column_index.saturating_add(1),
+                    app.schema_columns.len()
+                )
+            };
+            lines.push(Line::from(Span::styled(
+                format!("Columns ({column_position})"),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            append_windowed_schema_items(
+                &mut lines,
+                &app.schema_columns,
+                app.selected_column_index,
+                app.schema_lane == SchemaLane::Columns,
+                section_window,
+            );
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Relationships (Jump to related table action):",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            append_windowed_relationship_items(
+                &mut lines,
+                &app.schema_relationships,
+                app.selected_relationship_index,
+                section_window.saturating_sub(1).max(2),
+            );
             lines
         }
         Pane::Results => {
-            let visible_limit = usize::from(chunks[1].height.saturating_sub(3)).max(1);
+            let visible_limit = usize::from(chunks[1].height.saturating_sub(8)).max(1);
             let window_start = app.results_cursor.saturating_sub(visible_limit / 2);
             let rows = app.results.visible_rows(window_start, visible_limit);
             let no_rows = rows.is_empty();
@@ -3061,20 +3113,7 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                     state.page_size
                 )));
             }
-
-            for (offset, row) in rows.into_iter().enumerate() {
-                let absolute_index = window_start + offset;
-                let cursor = if absolute_index == app.results_cursor {
-                    ">"
-                } else {
-                    " "
-                };
-                lines.push(Line::from(format!(
-                    "{cursor} {:04} | {}",
-                    absolute_index + 1,
-                    row.values.join(" | ")
-                )));
-            }
+            lines.push(Line::from(""));
 
             if no_rows {
                 lines.push(Line::from(if app.query_running {
@@ -3082,14 +3121,31 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 } else {
                     "No rows buffered. Tab to Query Editor + Enter, or use 1 in Schema Explorer."
                 }));
+            } else {
+                let table_width = usize::from(chunks[1].width.saturating_sub(3));
+                let table_lines = build_aligned_results_rows(
+                    &app.result_columns,
+                    &rows,
+                    app.results_cursor,
+                    window_start,
+                    table_width,
+                );
+                lines.extend(table_lines);
             }
             lines
         }
         Pane::QueryEditor => {
             let mut lines = vec![
                 Line::from("Query Editor"),
-                Line::from("Enter: run query | Ctrl+Enter: newline"),
-                Line::from("Left/Right: cursor | Up/Down: query history"),
+                Line::from("SQL section is editable."),
+                Line::from("Enter: run query | Ctrl+Enter: newline | Left/Right: cursor | Up/Down: history"),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "SQL (editable):",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
             ];
 
@@ -3101,9 +3157,56 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
             if editor_lines.is_empty() {
                 lines.push(Line::from("  (empty query)"));
             } else {
+                let (cursor_line, cursor_col) = app.query_cursor_line_col();
+                let line_number_width = editor_lines.len().max(1).to_string().len();
+                let prefix_chars = line_number_width + 3;
+
                 for (index, line) in editor_lines.iter().enumerate() {
-                    lines.push(Line::from(format!("{:02} {}", index + 1, line)));
+                    let mut rendered_line = (*line).to_string();
+                    if index + 1 == cursor_line {
+                        let cursor_char_offset = cursor_col.saturating_sub(1);
+                        let byte_index =
+                            byte_index_for_char_offset(&rendered_line, cursor_char_offset);
+                        rendered_line.insert(byte_index, '|');
+                    }
+                    let numbered = format!(
+                        "{:>width$} | {}",
+                        index + 1,
+                        rendered_line,
+                        width = line_number_width
+                    );
+
+                    if index + 1 == cursor_line {
+                        lines.push(Line::from(Span::styled(
+                            numbered,
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        )));
+                    } else {
+                        lines.push(Line::from(numbered));
+                    }
                 }
+
+                let body_left = chunks[1].x.saturating_add(1);
+                let body_top = chunks[1].y.saturating_add(1);
+                let cursor_x = body_left
+                    .saturating_add(prefix_chars as u16)
+                    .saturating_add(cursor_col.saturating_sub(1) as u16)
+                    .min(
+                        chunks[1]
+                            .x
+                            .saturating_add(chunks[1].width.saturating_sub(2)),
+                    );
+                let cursor_y = body_top
+                    .saturating_add(5_u16)
+                    .saturating_add(cursor_line.saturating_sub(1) as u16)
+                    .min(
+                        chunks[1]
+                            .y
+                            .saturating_add(chunks[1].height.saturating_sub(2)),
+                    );
+                query_cursor_screen_position = Some((cursor_x, cursor_y));
             }
 
             let (cursor_line, cursor_col) = app.query_cursor_line_col();
@@ -3112,6 +3215,12 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
                 None => format!("history {}", app.query_history.len()),
             };
             lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Metadata:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
             lines.push(Line::from(format!(
                 "Cursor: line {cursor_line}, col {cursor_col} | {history_state}"
             )));
@@ -3123,6 +3232,14 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         .block(Block::default().borders(Borders::ALL).title("Workspace"))
         .alignment(Alignment::Left);
     frame.render_widget(body, chunks[1]);
+
+    let overlays_visible =
+        app.show_palette || app.show_help || app.exit_confirmation || app.error_panel.is_some();
+    if !overlays_visible {
+        if let Some((x, y)) = query_cursor_screen_position {
+            frame.set_cursor_position((x, y));
+        }
+    }
 
     let footer_line = if app.pane == Pane::ConnectionWizard {
         "F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit".to_string()
@@ -3282,6 +3399,277 @@ fn render_palette_popup(frame: &mut Frame<'_>, app: &TuiApp) {
     frame.render_widget(palette, area);
 }
 
+fn append_windowed_schema_items(
+    lines: &mut Vec<Line<'static>>,
+    items: &[String],
+    selected_index: usize,
+    active: bool,
+    max_visible: usize,
+) {
+    if items.is_empty() {
+        lines.push(Line::from("  (none)"));
+        return;
+    }
+
+    let clamped_selected = selected_index.min(items.len().saturating_sub(1));
+    let visible = max_visible.max(1).min(items.len());
+    let mut start = clamped_selected.saturating_sub(visible / 2);
+    if start + visible > items.len() {
+        start = items.len().saturating_sub(visible);
+    }
+    let end = (start + visible).min(items.len());
+
+    if start > 0 {
+        lines.push(Line::from(format!("  ... {} above", start)));
+    }
+
+    for (offset, item) in items[start..end].iter().enumerate() {
+        let index = start + offset;
+        let marker = if index == clamped_selected {
+            if active {
+                ">"
+            } else {
+                "*"
+            }
+        } else {
+            " "
+        };
+        let rendered = format!("{marker} {item}");
+        if index == clamped_selected {
+            lines.push(Line::from(Span::styled(
+                rendered,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else {
+            lines.push(Line::from(rendered));
+        }
+    }
+
+    if end < items.len() {
+        lines.push(Line::from(format!("  ... {} more", items.len() - end)));
+    }
+}
+
+fn append_windowed_relationship_items(
+    lines: &mut Vec<Line<'static>>,
+    relationships: &[TableRelationship],
+    selected_index: usize,
+    max_visible: usize,
+) {
+    if relationships.is_empty() {
+        lines.push(Line::from("  (none detected)"));
+        return;
+    }
+
+    let clamped_selected = selected_index.min(relationships.len().saturating_sub(1));
+    let visible = max_visible.max(1).min(relationships.len());
+    let mut start = clamped_selected.saturating_sub(visible / 2);
+    if start + visible > relationships.len() {
+        start = relationships.len().saturating_sub(visible);
+    }
+    let end = (start + visible).min(relationships.len());
+
+    if start > 0 {
+        lines.push(Line::from(format!("  ... {} above", start)));
+    }
+
+    for (offset, relationship) in relationships[start..end].iter().enumerate() {
+        let index = start + offset;
+        let marker = if index == clamped_selected { "*" } else { " " };
+        let direction = relationship_direction_label(relationship.direction);
+        let rendered = format!(
+            "{marker} {direction} {}.{} ({}, {} -> {})",
+            relationship.related_database,
+            relationship.related_table,
+            relationship.constraint_name,
+            relationship.source_column,
+            relationship.related_column
+        );
+        if index == clamped_selected {
+            lines.push(Line::from(Span::styled(
+                rendered,
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else {
+            lines.push(Line::from(rendered));
+        }
+    }
+
+    if end < relationships.len() {
+        lines.push(Line::from(format!(
+            "  ... {} more",
+            relationships.len() - end
+        )));
+    }
+}
+
+fn build_aligned_results_rows(
+    headers: &[String],
+    rows: &[&QueryRow],
+    selected_row: usize,
+    window_start: usize,
+    table_width: usize,
+) -> Vec<Line<'static>> {
+    let column_count = headers
+        .len()
+        .max(rows.iter().map(|row| row.values.len()).max().unwrap_or(0));
+    if column_count == 0 {
+        return vec![Line::from("Rows have no visible columns.")];
+    }
+
+    let prefix_width = 6_usize; // marker + 4-digit row number + space
+    let available_width = table_width.saturating_sub(prefix_width).max(8);
+
+    let mut visible_columns = column_count;
+    while visible_columns > 1 && min_table_width(visible_columns) > available_width {
+        visible_columns = visible_columns.saturating_sub(1);
+    }
+
+    let mut widths = (0..visible_columns)
+        .map(|column_index| {
+            let header_len = char_len(&column_label(headers, column_index));
+            let value_len = rows
+                .iter()
+                .filter_map(|row| row.values.get(column_index))
+                .map(|value| char_len(value))
+                .max()
+                .unwrap_or(0);
+            header_len.max(value_len).clamp(3, 28)
+        })
+        .collect::<Vec<_>>();
+
+    let mut total_width =
+        widths.iter().copied().sum::<usize>() + visible_columns.saturating_sub(1) * 3;
+    while total_width > available_width {
+        let mut reduced = false;
+        if let Some((index, _)) = widths.iter().enumerate().max_by_key(|(_, width)| **width) {
+            if widths[index] > 3 {
+                widths[index] -= 1;
+                total_width = total_width.saturating_sub(1);
+                reduced = true;
+            }
+        }
+        if !reduced {
+            break;
+        }
+    }
+
+    let header_cells = (0..visible_columns)
+        .map(|column_index| column_label(headers, column_index))
+        .collect::<Vec<_>>();
+    let header_row = format_aligned_cells(&header_cells, &widths);
+    let mut lines = vec![Line::from(Span::styled(
+        format!("      {header_row}"),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(Line::from(format!(
+        "      {}",
+        "-".repeat(char_len(&header_row))
+    )));
+
+    for (offset, row) in rows.iter().enumerate() {
+        let absolute_index = window_start + offset;
+        let marker = if absolute_index == selected_row {
+            ">"
+        } else {
+            " "
+        };
+        let row_cells = (0..visible_columns)
+            .map(|column_index| {
+                row.values
+                    .get(column_index)
+                    .cloned()
+                    .unwrap_or_else(String::new)
+            })
+            .collect::<Vec<_>>();
+        let row_text = format_aligned_cells(&row_cells, &widths);
+        lines.push(Line::from(format!(
+            "{marker}{:04} {row_text}",
+            absolute_index + 1
+        )));
+    }
+
+    if visible_columns < column_count {
+        lines.push(Line::from(format!(
+            "Showing {} of {} columns. Narrow terminal; widen window to see all.",
+            visible_columns, column_count
+        )));
+    }
+
+    lines
+}
+
+fn min_table_width(columns: usize) -> usize {
+    if columns == 0 {
+        return 0;
+    }
+    columns * 3 + columns.saturating_sub(1) * 3
+}
+
+fn column_label(headers: &[String], index: usize) -> String {
+    headers
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| format!("col{}", index + 1))
+}
+
+fn format_aligned_cells(cells: &[String], widths: &[usize]) -> String {
+    widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            let value = cells.get(index).map_or("", std::string::String::as_str);
+            pad_cell(value, *width)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn pad_cell(value: &str, width: usize) -> String {
+    let mut cell = truncate_cell(value, width);
+    let padding = width.saturating_sub(char_len(&cell));
+    if padding > 0 {
+        cell.push_str(&" ".repeat(padding));
+    }
+    cell
+}
+
+fn truncate_cell(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if char_len(value) <= width {
+        return value.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    let mut truncated = value.chars().take(width - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn char_len(value: &str) -> usize {
+    value.chars().count()
+}
+
+fn byte_index_for_char_offset(value: &str, char_offset: usize) -> usize {
+    if char_offset == 0 {
+        return 0;
+    }
+    value
+        .char_indices()
+        .map(|(index, _)| index)
+        .nth(char_offset)
+        .unwrap_or(value.len())
+}
+
 fn centered_rect(width_percent: u16, height_percent: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -3384,7 +3772,11 @@ fn demo_relationships(database: Option<&str>, table: Option<&str>) -> Vec<TableR
     }
 }
 
-fn bookmark_base_name(profile: Option<&str>, database: Option<&str>, table: Option<&str>) -> String {
+fn bookmark_base_name(
+    profile: Option<&str>,
+    database: Option<&str>,
+    table: Option<&str>,
+) -> String {
     let profile_part = profile
         .map(sanitize_bookmark_segment)
         .filter(|value| !value.is_empty())
@@ -3797,9 +4189,9 @@ mod tests {
 
     use super::{
         bookmark_base_name, candidate_key_column, centered_rect, connection_badge_and_marker,
-        extract_key_bounds, is_connection_lost_error, is_transient_query_error,
-        map_key_event, next_bookmark_name, parse_password_source, parse_read_only_flag,
-        parse_tls_mode, quote_identifier, render, suggest_limit_in_editor, ActionId,
+        extract_key_bounds, is_connection_lost_error, is_transient_query_error, map_key_event,
+        next_bookmark_name, parse_password_source, parse_read_only_flag, parse_tls_mode,
+        quote_identifier, render, suggest_limit_in_editor, wizard_form_from_profile, ActionId,
         ActionInvocation, AppView, ConnectIntent, DirectionKey, ErrorKind, Msg, MysqlDataBackend,
         PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer, SchemaLane, TuiApp,
         WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
@@ -4080,6 +4472,30 @@ mod tests {
     }
 
     #[test]
+    fn wizard_form_conversion_uses_profile_values() {
+        let mut profile =
+            ConnectionProfile::new("qa-profile".to_string(), "10.0.0.8".to_string(), "appuser");
+        profile.port = 4406;
+        profile.database = Some("analytics".to_string());
+        profile.password_source = PasswordSource::Keyring;
+        profile.tls_mode = TlsMode::VerifyIdentity;
+        profile.read_only = true;
+
+        let form = wizard_form_from_profile(&profile);
+        assert_eq!(form.profile_name, "qa-profile");
+        assert_eq!(form.host, "10.0.0.8");
+        assert_eq!(form.port, "4406");
+        assert_eq!(form.user, "appuser");
+        assert_eq!(form.database, "analytics");
+        assert_eq!(form.password_source, "keyring");
+        assert_eq!(form.tls_mode, "verify_identity");
+        assert_eq!(form.read_only, "yes");
+        assert_eq!(form.active_field, WizardField::ProfileName);
+        assert!(!form.editing);
+        assert!(form.edit_buffer.is_empty());
+    }
+
+    #[test]
     fn limit_suggestion_is_applied_in_editor_helper() {
         let suggested = suggest_limit_in_editor("SELECT * FROM users");
         assert_eq!(suggested, Some("SELECT * FROM users LIMIT 200".to_string()));
@@ -4189,7 +4605,10 @@ mod tests {
         assert_eq!(app.pane, Pane::QueryEditor);
         assert_eq!(app.selection.table.as_deref(), Some("events"));
         assert_eq!(app.selection.column.as_deref(), Some("user_id"));
-        assert_eq!(app.query_editor_text, "SELECT user_id FROM `app`.`events` LIMIT 5");
+        assert_eq!(
+            app.query_editor_text,
+            "SELECT user_id FROM `app`.`events` LIMIT 5"
+        );
         assert!(app.status_line.starts_with("Opened bookmark"));
     }
 
