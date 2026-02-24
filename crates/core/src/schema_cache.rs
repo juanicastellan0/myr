@@ -185,7 +185,11 @@ impl<B: SchemaBackend> SchemaCacheService<B> {
             return Ok(relationships);
         };
 
-        if let Some(table) = database.tables.iter().find(|table| table.name == table_name) {
+        if let Some(table) = database
+            .tables
+            .iter()
+            .find(|table| table.name == table_name)
+        {
             for foreign_key in &table.foreign_keys {
                 relationships.push(TableRelationship {
                     direction: RelationshipDirection::Outbound,

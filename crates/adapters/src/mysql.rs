@@ -116,12 +116,14 @@ impl SchemaBackend for MysqlDataBackend {
                             referenced_database,
                             referenced_table,
                             referenced_column,
-                        ): (String, String, String, String, String)| ForeignKeySchema {
-                            constraint_name,
-                            column_name,
-                            referenced_database,
-                            referenced_table,
-                            referenced_column,
+                        ): (String, String, String, String, String)| {
+                            ForeignKeySchema {
+                                constraint_name,
+                                column_name,
+                                referenced_database,
+                                referenced_table,
+                                referenced_column,
+                            }
                         },
                     )
                     .await

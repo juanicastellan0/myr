@@ -143,9 +143,7 @@ impl FileBookmarksStore {
 
     #[must_use]
     pub fn bookmark(&self, name: &str) -> Option<&SavedBookmark> {
-        self.bookmarks
-            .iter()
-            .find(|bookmark| bookmark.name == name)
+        self.bookmarks.iter().find(|bookmark| bookmark.name == name)
     }
 
     pub fn upsert_bookmark(&mut self, bookmark: SavedBookmark) {

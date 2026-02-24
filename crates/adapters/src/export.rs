@@ -2,8 +2,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use flate2::Compression as GzipCompression;
 use flate2::write::GzEncoder;
+use flate2::Compression as GzipCompression;
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 
@@ -60,10 +60,12 @@ pub fn export_rows_to_csv_with_options(
             path: path.display().to_string(),
             source,
         })?;
-    writer.write_all(b"\n").map_err(|source| ExportError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
+    writer
+        .write_all(b"\n")
+        .map_err(|source| ExportError::Write {
+            path: path.display().to_string(),
+            source,
+        })?;
 
     for row in rows {
         let mut values = Vec::with_capacity(headers.len());
@@ -81,10 +83,12 @@ pub fn export_rows_to_csv_with_options(
                 path: path.display().to_string(),
                 source,
             })?;
-        writer.write_all(b"\n").map_err(|source| ExportError::Write {
-            path: path.display().to_string(),
-            source,
-        })?;
+        writer
+            .write_all(b"\n")
+            .map_err(|source| ExportError::Write {
+                path: path.display().to_string(),
+                source,
+            })?;
     }
 
     writer.finish(path)?;
@@ -116,33 +120,41 @@ pub fn export_rows_to_json_with_options(
 
     match format {
         JsonExportFormat::Array => {
-            writer.write_all(b"[").map_err(|source| ExportError::Write {
-                path: path.display().to_string(),
-                source,
-            })?;
+            writer
+                .write_all(b"[")
+                .map_err(|source| ExportError::Write {
+                    path: path.display().to_string(),
+                    source,
+                })?;
             for (index, row) in rows.iter().enumerate() {
                 if index > 0 {
-                    writer.write_all(b",").map_err(|source| ExportError::Write {
-                        path: path.display().to_string(),
-                        source,
-                    })?;
+                    writer
+                        .write_all(b",")
+                        .map_err(|source| ExportError::Write {
+                            path: path.display().to_string(),
+                            source,
+                        })?;
                 }
                 let object = row_as_json_object(headers, row);
                 serde_json::to_writer(&mut writer, &Value::Object(object))?;
             }
-            writer.write_all(b"]\n").map_err(|source| ExportError::Write {
-                path: path.display().to_string(),
-                source,
-            })?;
+            writer
+                .write_all(b"]\n")
+                .map_err(|source| ExportError::Write {
+                    path: path.display().to_string(),
+                    source,
+                })?;
         }
         JsonExportFormat::JsonLines => {
             for row in rows {
                 let object = row_as_json_object(headers, row);
                 serde_json::to_writer(&mut writer, &Value::Object(object))?;
-                writer.write_all(b"\n").map_err(|source| ExportError::Write {
-                    path: path.display().to_string(),
-                    source,
-                })?;
+                writer
+                    .write_all(b"\n")
+                    .map_err(|source| ExportError::Write {
+                        path: path.display().to_string(),
+                        source,
+                    })?;
             }
         }
     }
@@ -154,7 +166,9 @@ pub fn export_rows_to_json_with_options(
 fn row_as_json_object(headers: &[String], row: &[String]) -> Map<String, Value> {
     let mut object = Map::with_capacity(headers.len());
     for (column_index, header) in headers.iter().enumerate() {
-        let value = row.get(column_index).map_or(Value::Null, |value| json!(value));
+        let value = row
+            .get(column_index)
+            .map_or(Value::Null, |value| json!(value));
         object.insert(header.clone(), value);
     }
     object
@@ -276,8 +290,9 @@ mod tests {
         let headers = vec!["id".to_string(), "name".to_string()];
         let rows = vec![vec!["1".to_string(), "alpha".to_string()]];
 
-        let written = export_rows_to_csv_with_options(&path, &headers, &rows, ExportCompression::Gzip)
-            .expect("gzip csv export failed");
+        let written =
+            export_rows_to_csv_with_options(&path, &headers, &rows, ExportCompression::Gzip)
+                .expect("gzip csv export failed");
         assert_eq!(written, 1);
 
         let file = fs::File::open(path).expect("open gzip file");
