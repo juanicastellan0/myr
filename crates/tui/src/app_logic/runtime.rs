@@ -556,8 +556,10 @@ impl TuiApp {
                 self.results = results;
                 self.has_results = !self.results.is_empty();
                 self.results_cursor = 0;
+                self.results_column_cursor = 0;
                 self.results_search_mode = false;
                 self.results_search_query.clear();
+                self.reset_results_column_focus();
                 self.query_retry_attempts = 0;
                 self.reconnect_attempts = 0;
                 self.inflight_query_sql = None;

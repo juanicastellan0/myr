@@ -46,7 +46,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 
 ## M9: UX Clarity and Discoverability
 
-- [ ] Results table v2:
+- [x] Results table v2:
   - Horizontal scroll and viewport indicator.
   - Sticky header row + clearer selected-row/selected-column emphasis.
   - Better width strategy for long text/JSON cells.
@@ -105,7 +105,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 ## Next Up (Proposed Execution Order)
 
 - [ ] Remove adapter panic path + add regression test.
-- [ ] Implement palette fuzzy ranking with aliases.
-- [ ] Add results horizontal scrolling and sticky headers.
+- [ ] Add Schema Explorer filter-as-you-type (database/table/column).
+- [ ] Add profile/bookmark manager screen (list/select/rename/delete).
 - [ ] Add architecture notes in `docs/architecture.md`.
 - [ ] Split `app/src/bin/benchmark.rs` into parser/runner/report modules.

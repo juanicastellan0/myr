@@ -159,6 +159,7 @@ impl TuiApp {
 
         if !self.schema_columns.is_empty() {
             self.result_columns = self.schema_columns.clone();
+            self.reset_results_column_focus();
         }
         self.pagination_state = Some(state);
         self.pending_page_transition = Some(PageTransition::Reset);
@@ -186,6 +187,7 @@ impl TuiApp {
 
         if !self.schema_columns.is_empty() {
             self.result_columns = self.schema_columns.clone();
+            self.reset_results_column_focus();
         }
         self.pending_page_transition = Some(transition);
         self.execute_sql_with_guard(sql);

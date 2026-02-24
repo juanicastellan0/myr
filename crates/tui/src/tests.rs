@@ -1025,7 +1025,23 @@ fn navigate_results_reports_empty_and_updates_cursor() {
 
     app.populate_demo_results();
     app.navigate_results(DirectionKey::Down);
-    assert!(app.status_line.starts_with("Results cursor:"));
+    assert!(app.status_line.starts_with("Results cursor: row"));
+}
+
+#[test]
+fn navigate_results_horizontal_changes_active_column() {
+    let mut app = app_in_pane(Pane::Results);
+    app.populate_demo_results();
+
+    assert_eq!(app.selection.column.as_deref(), Some("value"));
+
+    app.navigate_results(DirectionKey::Right);
+    assert_eq!(app.selection.column.as_deref(), Some("observed_at"));
+    assert!(app.status_line.contains("col 3 / 3"));
+
+    app.navigate_results(DirectionKey::Left);
+    assert_eq!(app.selection.column.as_deref(), Some("value"));
+    assert!(app.status_line.contains("col 2 / 3"));
 }
 
 #[test]

@@ -117,6 +117,20 @@ Expected:
 - Results pane shows rows.
 - Status line reports `Query returned ... rows`.
 
+### Results Table Horizontal Viewport
+
+Steps:
+
+1. In Results pane, press `Right` several times to move active column.
+2. Press `Left` to move back.
+3. Observe the table header and viewport metadata line.
+
+Expected:
+
+- `Left/Right` changes the active result column without changing selected row.
+- Header/cell rendering visually emphasizes the active column.
+- When terminal width is narrow, viewport line reports visible column range (for example `Columns 3-5 / 8`).
+
 ## Read-only Profile Guard
 
 Steps:

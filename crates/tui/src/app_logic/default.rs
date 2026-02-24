@@ -46,6 +46,7 @@ impl Default for TuiApp {
                 "observed_at".to_string(),
             ],
             results_cursor: 0,
+            results_column_cursor: 1,
             results_search_mode: false,
             results_search_query: String::new(),
             results: ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY),

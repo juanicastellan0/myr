@@ -287,19 +287,36 @@ impl TuiApp {
             return;
         }
 
+        let column_count = self.result_column_count();
         match direction {
-            DirectionKey::Up | DirectionKey::Left => {
+            DirectionKey::Up => {
                 self.results_cursor = self.results_cursor.saturating_sub(1);
             }
-            DirectionKey::Down | DirectionKey::Right => {
+            DirectionKey::Down => {
                 self.results_cursor = (self.results_cursor + 1).min(row_count.saturating_sub(1));
             }
+            DirectionKey::Left => {
+                self.results_column_cursor = self.results_column_cursor.saturating_sub(1);
+            }
+            DirectionKey::Right => {
+                self.results_column_cursor =
+                    (self.results_column_cursor + 1).min(column_count.saturating_sub(1));
+            }
         }
+        self.sync_results_column_selection();
+
+        let selected_column = self
+            .selection
+            .column
+            .as_deref()
+            .unwrap_or("col?");
 
         self.status_line = format!(
-            "Results cursor: {} / {}",
+            "Results cursor: row {} / {} | col {} / {} ({selected_column})",
             self.results_cursor + 1,
-            row_count
+            row_count,
+            self.results_column_cursor + 1,
+            column_count.max(1),
         );
     }
 
@@ -373,6 +390,7 @@ impl TuiApp {
     pub(super) fn populate_demo_results(&mut self) {
         self.results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
         self.results_cursor = 0;
+        self.results_column_cursor = 0;
         self.results_search_mode = false;
         self.results_search_query.clear();
         self.result_columns = vec![
@@ -396,7 +414,58 @@ impl TuiApp {
         }
 
         self.has_results = true;
-        self.selection.column = Some("value".to_string());
+        self.results_column_cursor = self
+            .result_columns
+            .iter()
+            .position(|column| column == "value")
+            .unwrap_or(0);
+        self.sync_results_column_selection();
+    }
+
+    pub(super) fn reset_results_column_focus(&mut self) {
+        let column_count = self.result_column_count();
+        if column_count == 0 {
+            self.results_column_cursor = 0;
+            self.selection.column = None;
+            return;
+        }
+
+        if let Some(selected) = self
+            .selection
+            .column
+            .as_deref()
+            .and_then(|column| self.result_columns.iter().position(|candidate| candidate == column))
+        {
+            self.results_column_cursor = selected;
+        } else {
+            self.results_column_cursor = self.results_column_cursor.min(column_count - 1);
+        }
+        self.sync_results_column_selection();
+    }
+
+    fn sync_results_column_selection(&mut self) {
+        let column_count = self.result_column_count();
+        if column_count == 0 {
+            self.results_column_cursor = 0;
+            self.selection.column = None;
+            return;
+        }
+
+        self.results_column_cursor = self.results_column_cursor.min(column_count - 1);
+        self.selection.column = Some(self.result_column_name(self.results_column_cursor));
+    }
+
+    fn result_column_count(&self) -> usize {
+        self.result_columns
+            .len()
+            .max(self.results.get(self.results_cursor).map_or(0, |row| row.values.len()))
+    }
+
+    fn result_column_name(&self, index: usize) -> String {
+        self.result_columns
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| format!("col{}", index + 1))
     }
 
     pub(super) fn export_results(&mut self, format: myr_core::actions_engine::ExportFormat) {

@@ -321,6 +321,7 @@ struct TuiApp {
     has_results: bool,
     result_columns: Vec<String>,
     results_cursor: usize,
+    results_column_cursor: usize,
     results_search_mode: bool,
     results_search_query: String,
     results: ResultsRingBuffer<QueryRow>,
