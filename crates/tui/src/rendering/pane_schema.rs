@@ -5,7 +5,9 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
     let section_window = usize::from(body_area.height.saturating_sub(10)).clamp(3, 8);
     let mut lines = vec![
         Line::from("Schema Explorer"),
-        Line::from("Left/Right: lane focus | Up/Down: selection | 1: preview table"),
+        Line::from(
+            "Left/Right: lane focus | Up/Down: selection | Type to filter lane | 1: preview table",
+        ),
         Line::from(format!(
             "Focus lane: {} | Active DB: {}",
             app.schema_lane.label(),
@@ -14,17 +16,15 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
         Line::from(""),
     ];
 
-    let database_position = if app.schema_databases.is_empty() {
-        "0/0".to_string()
-    } else {
-        format!(
-            "{}/{}",
-            app.selected_database_index.saturating_add(1),
-            app.schema_databases.len()
-        )
-    };
+    let database_matches =
+        filtered_item_indices(&app.schema_databases, app.schema_database_filter.as_str());
     lines.push(Line::from(Span::styled(
-        format!("Databases ({database_position})"),
+        format!(
+            "Databases ({}/{}) | filter `{}`",
+            database_matches.len(),
+            app.schema_databases.len(),
+            display_filter_value(app.schema_database_filter.as_str())
+        ),
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -35,20 +35,18 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
         app.selected_database_index,
         app.schema_lane == SchemaLane::Databases,
         section_window,
+        app.schema_database_filter.as_str(),
     );
 
     lines.push(Line::from(""));
-    let table_position = if app.schema_tables.is_empty() {
-        "0/0".to_string()
-    } else {
-        format!(
-            "{}/{}",
-            app.selected_table_index.saturating_add(1),
-            app.schema_tables.len()
-        )
-    };
+    let table_matches = filtered_item_indices(&app.schema_tables, app.schema_table_filter.as_str());
     lines.push(Line::from(Span::styled(
-        format!("Tables ({table_position})"),
+        format!(
+            "Tables ({}/{}) | filter `{}`",
+            table_matches.len(),
+            app.schema_tables.len(),
+            display_filter_value(app.schema_table_filter.as_str())
+        ),
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -59,20 +57,19 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
         app.selected_table_index,
         app.schema_lane == SchemaLane::Tables,
         section_window,
+        app.schema_table_filter.as_str(),
     );
 
     lines.push(Line::from(""));
-    let column_position = if app.schema_columns.is_empty() {
-        "0/0".to_string()
-    } else {
-        format!(
-            "{}/{}",
-            app.selected_column_index.saturating_add(1),
-            app.schema_columns.len()
-        )
-    };
+    let column_matches =
+        filtered_item_indices(&app.schema_columns, app.schema_column_filter.as_str());
     lines.push(Line::from(Span::styled(
-        format!("Columns ({column_position})"),
+        format!(
+            "Columns ({}/{}) | filter `{}`",
+            column_matches.len(),
+            app.schema_columns.len(),
+            display_filter_value(app.schema_column_filter.as_str())
+        ),
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
@@ -83,6 +80,7 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
         app.selected_column_index,
         app.schema_lane == SchemaLane::Columns,
         section_window,
+        app.schema_column_filter.as_str(),
     );
 
     lines.push(Line::from(""));
@@ -108,26 +106,41 @@ fn append_windowed_schema_items(
     selected_index: usize,
     active: bool,
     max_visible: usize,
+    filter: &str,
 ) {
     if items.is_empty() {
         lines.push(Line::from("  (none)"));
         return;
     }
 
-    let clamped_selected = selected_index.min(items.len().saturating_sub(1));
-    let visible = max_visible.max(1).min(items.len());
-    let mut start = clamped_selected.saturating_sub(visible / 2);
-    if start + visible > items.len() {
-        start = items.len().saturating_sub(visible);
+    let filtered = filtered_item_indices(items, filter);
+    if filtered.is_empty() {
+        lines.push(Line::from("  (no matches)"));
+        return;
     }
-    let end = (start + visible).min(items.len());
+    let clamped_selected = if filtered.contains(&selected_index) {
+        selected_index
+    } else {
+        filtered[0]
+    };
+    let selected_position = filtered
+        .iter()
+        .position(|index| *index == clamped_selected)
+        .unwrap_or(0);
+
+    let visible = max_visible.max(1).min(filtered.len());
+    let mut start = selected_position.saturating_sub(visible / 2);
+    if start + visible > filtered.len() {
+        start = filtered.len().saturating_sub(visible);
+    }
+    let end = (start + visible).min(filtered.len());
 
     if start > 0 {
         lines.push(Line::from(format!("  ... {} above", start)));
     }
 
-    for (offset, item) in items[start..end].iter().enumerate() {
-        let index = start + offset;
+    for index in filtered.iter().take(end).skip(start).copied() {
+        let item = items.get(index).map_or("", String::as_str);
         let marker = if index == clamped_selected {
             if active {
                 ">"
@@ -150,8 +163,34 @@ fn append_windowed_schema_items(
         }
     }
 
-    if end < items.len() {
-        lines.push(Line::from(format!("  ... {} more", items.len() - end)));
+    if end < filtered.len() {
+        lines.push(Line::from(format!("  ... {} more", filtered.len() - end)));
+    }
+}
+
+fn filtered_item_indices(items: &[String], filter: &str) -> Vec<usize> {
+    let needle = filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return (0..items.len()).collect();
+    }
+
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            item.to_ascii_lowercase()
+                .contains(needle.as_str())
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn display_filter_value(filter: &str) -> &str {
+    let trimmed = filter.trim();
+    if trimmed.is_empty() {
+        "-"
+    } else {
+        trimmed
     }
 }
 

@@ -37,7 +37,7 @@ pub(super) fn connection_badge_and_marker(
     match connection_state {
         "CONNECTED" => ("[+]", pulse_char(tick)),
         "CONNECTING" | "RECONNECTING" => ("[~]", spinner_char(tick)),
-        _ => ("[x]", if tick % 2 == 0 { '-' } else { ' ' }),
+        _ => ("[x]", if tick.is_multiple_of(2) { '-' } else { ' ' }),
     }
 }
 

@@ -43,7 +43,7 @@ pub(super) fn render_runtime_bar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect
         connection_badge_and_marker(connection_state, app.loading_tick);
     let connection_color = match connection_state {
         "CONNECTED" => {
-            if app.loading_tick % 2 == 0 {
+            if app.loading_tick.is_multiple_of(2) {
                 Color::Green
             } else {
                 Color::Cyan
@@ -134,7 +134,7 @@ pub(super) fn render_tabs_bar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     .collect::<Vec<_>>();
 
     let tab_highlight_style = if app.pane_flash_ticks > 0 {
-        let flash_bg = if app.loading_tick % 2 == 0 {
+        let flash_bg = if app.loading_tick.is_multiple_of(2) {
             Color::Yellow
         } else {
             Color::Cyan

@@ -18,6 +18,8 @@ impl TuiApp {
                 self.wizard_form.edit_buffer.push(ch);
                 self.status_line = format!("Editing {}", self.wizard_form.active_field.label());
             }
+        } else if self.pane == Pane::SchemaExplorer {
+            self.append_schema_filter_char(ch);
         } else if self.pane == Pane::QueryEditor {
             self.insert_text_at_query_cursor(&ch.to_string());
             self.status_line = "Query text updated".to_string();
@@ -52,6 +54,8 @@ impl TuiApp {
                     self.wizard_form.active_field.label()
                 );
             }
+        } else if self.pane == Pane::SchemaExplorer {
+            self.backspace_schema_filter();
         } else if self.pane == Pane::QueryEditor {
             self.backspace_query_editor_char();
             self.status_line = "Query text updated".to_string();
@@ -73,6 +77,8 @@ impl TuiApp {
                     self.wizard_form.active_field.label()
                 );
             }
+        } else if self.pane == Pane::SchemaExplorer {
+            self.clear_schema_filter();
         } else if self.pane == Pane::QueryEditor {
             self.query_editor_text.clear();
             self.query_cursor = 0;

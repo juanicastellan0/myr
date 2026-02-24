@@ -362,6 +362,81 @@ fn schema_table_navigation_updates_column_selection() {
 }
 
 #[test]
+fn schema_database_filter_updates_active_selection() {
+    let mut app = TuiApp {
+        pane: Pane::SchemaExplorer,
+        schema_lane: SchemaLane::Databases,
+        ..TuiApp::default()
+    };
+    app.schema_databases = vec![
+        "app".to_string(),
+        "analytics".to_string(),
+        "myr_bench".to_string(),
+    ];
+    app.selected_database_index = 0;
+    app.active_database = Some("app".to_string());
+    app.selection.database = Some("app".to_string());
+
+    app.handle(Msg::InputChar('b'));
+    app.handle(Msg::InputChar('e'));
+    app.handle(Msg::InputChar('n'));
+
+    assert_eq!(app.schema_database_filter, "ben");
+    assert_eq!(app.active_database.as_deref(), Some("myr_bench"));
+    assert_eq!(app.selection.database.as_deref(), Some("myr_bench"));
+    assert!(app.status_line.contains("matched 1 entries"));
+}
+
+#[test]
+fn schema_table_filter_navigation_moves_within_matches() {
+    let mut app = TuiApp {
+        pane: Pane::SchemaExplorer,
+        schema_lane: SchemaLane::Tables,
+        ..TuiApp::default()
+    };
+    app.selection.database = Some("app".to_string());
+    app.selection.table = app.schema_tables.first().cloned();
+    app.reload_columns_for_selected_table();
+
+    app.handle(Msg::InputChar('e'));
+    assert_eq!(app.schema_table_filter, "e");
+    assert_eq!(app.selection.table.as_deref(), Some("users"));
+
+    app.navigate(DirectionKey::Down);
+    assert_eq!(app.selection.table.as_deref(), Some("sessions"));
+
+    app.navigate(DirectionKey::Down);
+    assert_eq!(app.selection.table.as_deref(), Some("events"));
+    assert_eq!(app.selected_table_index, 3);
+}
+
+#[test]
+fn schema_column_filter_backspace_and_clear_updates_selection() {
+    let mut app = TuiApp {
+        pane: Pane::SchemaExplorer,
+        schema_lane: SchemaLane::Columns,
+        ..TuiApp::default()
+    };
+    app.selection.database = Some("app".to_string());
+    app.selection.table = Some("users".to_string());
+    app.reload_columns_for_selected_table();
+
+    app.handle(Msg::InputChar('u'));
+    app.handle(Msg::InputChar('p'));
+    app.handle(Msg::InputChar('d'));
+    assert_eq!(app.schema_column_filter, "upd");
+    assert_eq!(app.selection.column.as_deref(), Some("updated_at"));
+
+    app.handle(Msg::Backspace);
+    assert_eq!(app.schema_column_filter, "up");
+    assert_eq!(app.selection.column.as_deref(), Some("updated_at"));
+
+    app.handle(Msg::ClearInput);
+    assert!(app.schema_column_filter.is_empty());
+    assert_eq!(app.selection.column.as_deref(), Some("id"));
+}
+
+#[test]
 fn demo_relationships_are_loaded_for_selected_table() {
     let mut app = app_in_pane(Pane::SchemaExplorer);
     app.selection.database = Some("app".to_string());
@@ -1055,6 +1130,26 @@ fn connect_from_wizard_handles_connect_failure_path() {
     drive_connect_to_completion(&mut app);
     assert!(!app.connect_requested);
     assert!(app.status_line.starts_with("Connect failed:"));
+}
+
+#[test]
+fn apply_connected_profile_resets_schema_filters() {
+    let profile = ConnectionProfile::new("local-dev", "127.0.0.1", "root");
+    let mut app = app_in_pane(Pane::SchemaExplorer);
+    app.schema_database_filter = "bench".to_string();
+    app.schema_table_filter = "event".to_string();
+    app.schema_column_filter = "created".to_string();
+
+    app.apply_connected_profile(
+        profile,
+        Duration::from_millis(1),
+        vec!["myr_bench".to_string()],
+        None,
+    );
+
+    assert!(app.schema_database_filter.is_empty());
+    assert!(app.schema_table_filter.is_empty());
+    assert!(app.schema_column_filter.is_empty());
 }
 
 #[test]

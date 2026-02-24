@@ -466,6 +466,9 @@ impl TuiApp {
         self.data_backend = Some(data_backend);
         self.schema_cache = Some(schema_cache);
         self.schema_databases = databases;
+        self.schema_database_filter.clear();
+        self.schema_table_filter.clear();
+        self.schema_column_filter.clear();
         self.selected_database_index = active_database
             .as_deref()
             .and_then(|database| {

@@ -352,7 +352,7 @@ mod tests {
             "payload".to_string(),
             "created_at".to_string(),
         ];
-        let rows = vec![QueryRow::new(vec![
+        let rows = [QueryRow::new(vec![
             "1".to_string(),
             "22".to_string(),
             "search".to_string(),

@@ -95,6 +95,25 @@ Expected:
 - Active tab briefly flashes on pane change.
 - Status line shows pane switch messages.
 
+## Schema Explorer Filter-as-you-Type
+
+Steps:
+
+1. Go to Schema Explorer.
+2. Keep focus on `Tables` lane and type `sess`.
+3. Confirm selection moves to `sessions`.
+4. Press `Ctrl+U` to clear the lane filter.
+5. Move to `Columns` lane (`Right`) and type `upd`.
+6. Confirm selection moves to `updated_at`.
+7. Press `Backspace` and then `Ctrl+U`.
+
+Expected:
+
+- Typed text filters only the active lane (database/table/column).
+- Selection is constrained to matching entries and `Up`/`Down` navigate within matches.
+- Section headers show match counts and the active filter text.
+- `Backspace` removes one filter character and `Ctrl+U` clears the active lane filter.
+
 ## Query and Results
 
 Steps:

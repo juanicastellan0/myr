@@ -264,6 +264,7 @@ struct PaginationState {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum ConnectWorkerOutcome {
     Success {
         profile: ConnectionProfile,
@@ -303,6 +304,9 @@ struct TuiApp {
     schema_relationships: Vec<TableRelationship>,
     selected_relationship_index: usize,
     schema_lane: SchemaLane,
+    schema_database_filter: String,
+    schema_table_filter: String,
+    schema_column_filter: String,
     show_help: bool,
     show_palette: bool,
     palette_query: String,

@@ -75,11 +75,19 @@ impl TuiApp {
         match direction {
             DirectionKey::Left => {
                 self.schema_lane = self.schema_lane.previous();
-                self.status_line = format!("Schema focus: {}", self.schema_lane.label());
+                self.status_line = format!(
+                    "Schema focus: {} (filter: `{}`)",
+                    self.schema_lane.label(),
+                    self.active_schema_filter()
+                );
             }
             DirectionKey::Right => {
                 self.schema_lane = self.schema_lane.next();
-                self.status_line = format!("Schema focus: {}", self.schema_lane.label());
+                self.status_line = format!(
+                    "Schema focus: {} (filter: `{}`)",
+                    self.schema_lane.label(),
+                    self.active_schema_filter()
+                );
             }
             DirectionKey::Up | DirectionKey::Down => match self.schema_lane {
                 SchemaLane::Databases => self.navigate_schema_databases(direction),
@@ -89,19 +97,161 @@ impl TuiApp {
         }
     }
 
+    pub(super) fn append_schema_filter_char(&mut self, ch: char) {
+        if !ch.is_ascii_graphic() && ch != ' ' {
+            return;
+        }
+        self.active_schema_filter_mut().push(ch);
+        self.apply_active_schema_filter();
+    }
+
+    pub(super) fn backspace_schema_filter(&mut self) {
+        self.active_schema_filter_mut().pop();
+        self.apply_active_schema_filter();
+    }
+
+    pub(super) fn clear_schema_filter(&mut self) {
+        self.active_schema_filter_mut().clear();
+        self.apply_active_schema_filter();
+    }
+
+    fn active_schema_filter(&self) -> &str {
+        match self.schema_lane {
+            SchemaLane::Databases => self.schema_database_filter.as_str(),
+            SchemaLane::Tables => self.schema_table_filter.as_str(),
+            SchemaLane::Columns => self.schema_column_filter.as_str(),
+        }
+    }
+
+    fn active_schema_filter_mut(&mut self) -> &mut String {
+        match self.schema_lane {
+            SchemaLane::Databases => &mut self.schema_database_filter,
+            SchemaLane::Tables => &mut self.schema_table_filter,
+            SchemaLane::Columns => &mut self.schema_column_filter,
+        }
+    }
+
+    fn apply_active_schema_filter(&mut self) {
+        match self.schema_lane {
+            SchemaLane::Databases => self.apply_database_filter(),
+            SchemaLane::Tables => self.apply_table_filter(),
+            SchemaLane::Columns => self.apply_column_filter(),
+        }
+    }
+
+    fn apply_database_filter(&mut self) {
+        if self.schema_databases.is_empty() {
+            self.status_line = "No databases available".to_string();
+            return;
+        }
+
+        let filtered = filtered_schema_indices(
+            &self.schema_databases,
+            self.schema_database_filter.as_str(),
+        );
+        if filtered.is_empty() {
+            self.status_line = format!(
+                "Database filter `{}` matched 0 entries",
+                self.schema_database_filter
+            );
+            return;
+        }
+
+        self.selected_database_index = filtered[0];
+        self.active_database = self
+            .schema_databases
+            .get(self.selected_database_index)
+            .cloned();
+        self.selection.database = self.active_database.clone();
+        self.reload_tables_for_active_database();
+        self.clear_pagination_state();
+        self.set_query_editor_to_selected_table();
+        self.status_line = format!(
+            "Database filter `{}` matched {} entries",
+            self.schema_database_filter,
+            filtered.len()
+        );
+    }
+
+    fn apply_table_filter(&mut self) {
+        if self.schema_tables.is_empty() {
+            self.status_line = "No tables available".to_string();
+            return;
+        }
+
+        let filtered =
+            filtered_schema_indices(&self.schema_tables, self.schema_table_filter.as_str());
+        if filtered.is_empty() {
+            self.status_line = format!("Table filter `{}` matched 0 entries", self.schema_table_filter);
+            return;
+        }
+
+        self.selected_table_index = filtered[0];
+        self.selection.table = self.schema_tables.get(self.selected_table_index).cloned();
+        self.reload_columns_for_selected_table();
+        self.clear_pagination_state();
+        self.set_query_editor_to_selected_table();
+        self.status_line = format!(
+            "Table filter `{}` matched {} entries",
+            self.schema_table_filter,
+            filtered.len()
+        );
+    }
+
+    fn apply_column_filter(&mut self) {
+        if self.schema_columns.is_empty() {
+            self.status_line = "No columns available".to_string();
+            return;
+        }
+
+        let filtered =
+            filtered_schema_indices(&self.schema_columns, self.schema_column_filter.as_str());
+        if filtered.is_empty() {
+            self.status_line = format!(
+                "Column filter `{}` matched 0 entries",
+                self.schema_column_filter
+            );
+            return;
+        }
+
+        self.selected_column_index = filtered[0];
+        self.selection.column = self.schema_columns.get(self.selected_column_index).cloned();
+        self.clear_pagination_state();
+        let selected = self.selection.column.as_deref().unwrap_or("-");
+        self.status_line = format!(
+            "Column filter `{}` matched {} entries (active `{selected}`)",
+            self.schema_column_filter,
+            filtered.len()
+        );
+    }
+
     fn navigate_schema_databases(&mut self, direction: DirectionKey) {
         if self.schema_databases.is_empty() {
             self.status_line = "No databases available".to_string();
             return;
         }
 
+        let filtered = filtered_schema_indices(
+            &self.schema_databases,
+            self.schema_database_filter.as_str(),
+        );
+        if filtered.is_empty() {
+            self.status_line = format!(
+                "No databases match filter `{}`",
+                self.schema_database_filter
+            );
+            return;
+        }
+
         match direction {
             DirectionKey::Up => {
-                self.selected_database_index = self.selected_database_index.saturating_sub(1);
+                self.selected_database_index = previous_filtered_index(
+                    &filtered,
+                    self.selected_database_index,
+                );
             }
             DirectionKey::Down => {
-                let max_index = self.schema_databases.len() - 1;
-                self.selected_database_index = (self.selected_database_index + 1).min(max_index);
+                self.selected_database_index = next_filtered_index(&filtered, self.selected_database_index);
             }
             DirectionKey::Left | DirectionKey::Right => {}
         }
@@ -126,13 +276,18 @@ impl TuiApp {
             return;
         }
 
+        let filtered = filtered_schema_indices(&self.schema_tables, self.schema_table_filter.as_str());
+        if filtered.is_empty() {
+            self.status_line = format!("No tables match filter `{}`", self.schema_table_filter);
+            return;
+        }
+
         match direction {
             DirectionKey::Up => {
-                self.selected_table_index = self.selected_table_index.saturating_sub(1);
+                self.selected_table_index = previous_filtered_index(&filtered, self.selected_table_index);
             }
             DirectionKey::Down => {
-                let max_index = self.schema_tables.len() - 1;
-                self.selected_table_index = (self.selected_table_index + 1).min(max_index);
+                self.selected_table_index = next_filtered_index(&filtered, self.selected_table_index);
             }
             DirectionKey::Left | DirectionKey::Right => {}
         }
@@ -153,13 +308,20 @@ impl TuiApp {
             return;
         }
 
+        let filtered =
+            filtered_schema_indices(&self.schema_columns, self.schema_column_filter.as_str());
+        if filtered.is_empty() {
+            self.status_line = format!("No columns match filter `{}`", self.schema_column_filter);
+            return;
+        }
+
         match direction {
             DirectionKey::Up => {
-                self.selected_column_index = self.selected_column_index.saturating_sub(1);
+                self.selected_column_index =
+                    previous_filtered_index(&filtered, self.selected_column_index);
             }
             DirectionKey::Down => {
-                let max_index = self.schema_columns.len() - 1;
-                self.selected_column_index = (self.selected_column_index + 1).min(max_index);
+                self.selected_column_index = next_filtered_index(&filtered, self.selected_column_index);
             }
             DirectionKey::Left | DirectionKey::Right => {}
         }
@@ -196,6 +358,12 @@ impl TuiApp {
 
         self.selected_table_index = 0;
         self.selection.table = self.schema_tables.first().cloned();
+        if let Some(filtered_index) =
+            first_filtered_index(&self.schema_tables, self.schema_table_filter.as_str())
+        {
+            self.selected_table_index = filtered_index;
+            self.selection.table = self.schema_tables.get(filtered_index).cloned();
+        }
         self.reload_columns_for_selected_table();
     }
 
@@ -231,6 +399,12 @@ impl TuiApp {
 
         self.selected_column_index = 0;
         self.selection.column = self.schema_columns.first().cloned();
+        if let Some(filtered_index) =
+            first_filtered_index(&self.schema_columns, self.schema_column_filter.as_str())
+        {
+            self.selected_column_index = filtered_index;
+            self.selection.column = self.schema_columns.get(filtered_index).cloned();
+        }
         self.reload_relationships_for_selected_table();
     }
 
@@ -758,6 +932,44 @@ impl TuiApp {
         let entries = self.palette_entries();
         entries.get(self.palette_selection).copied()
     }
+}
+
+fn first_filtered_index(items: &[String], filter: &str) -> Option<usize> {
+    filtered_schema_indices(items, filter).into_iter().next()
+}
+
+fn filtered_schema_indices(items: &[String], filter: &str) -> Vec<usize> {
+    let needle = filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return (0..items.len()).collect();
+    }
+
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            item.to_ascii_lowercase()
+                .contains(needle.as_str())
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn previous_filtered_index(indices: &[usize], current: usize) -> usize {
+    let position = indices
+        .iter()
+        .position(|index| *index == current)
+        .unwrap_or(0);
+    indices[position.saturating_sub(1)]
+}
+
+fn next_filtered_index(indices: &[usize], current: usize) -> usize {
+    let position = indices
+        .iter()
+        .position(|index| *index == current)
+        .unwrap_or(0);
+    let next_position = (position + 1).min(indices.len().saturating_sub(1));
+    indices[next_position]
 }
 
 fn palette_aliases(action_id: ActionId) -> &'static [&'static str] {
