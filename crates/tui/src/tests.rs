@@ -901,6 +901,24 @@ fn palette_input_and_selection_paths_update_state() {
 }
 
 #[test]
+fn palette_supports_fuzzy_and_alias_queries() {
+    let mut app = app_in_pane(Pane::SchemaExplorer);
+    app.show_palette = true;
+
+    app.palette_query = "pvw".to_string();
+    let entries = app.palette_entries();
+    assert_eq!(entries.first().copied(), Some(ActionId::PreviewTable));
+
+    app.palette_query = "ddl".to_string();
+    let entries = app.palette_entries();
+    assert_eq!(entries.first().copied(), Some(ActionId::ShowCreateTable));
+
+    app.palette_query = "fk".to_string();
+    let entries = app.palette_entries();
+    assert_eq!(entries.first().copied(), Some(ActionId::JumpToRelatedTable));
+}
+
+#[test]
 fn rendering_covers_all_panes_and_popups() {
     let mut wizard = app_in_pane(Pane::ConnectionWizard);
     wizard.show_help = true;

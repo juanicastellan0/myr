@@ -1,5 +1,5 @@
 impl TuiApp {
-    fn navigate(&mut self, direction: DirectionKey) {
+    pub(super) fn navigate(&mut self, direction: DirectionKey) {
         if self.show_palette {
             self.navigate_palette(direction);
             return;
@@ -199,7 +199,7 @@ impl TuiApp {
         self.reload_columns_for_selected_table();
     }
 
-    fn reload_columns_for_selected_table(&mut self) {
+    pub(super) fn reload_columns_for_selected_table(&mut self) {
         let Some(table_name) = self.selection.table.clone() else {
             self.schema_columns.clear();
             self.selected_column_index = 0;
@@ -280,7 +280,7 @@ impl TuiApp {
         self.query_history_draft = None;
     }
 
-    fn navigate_results(&mut self, direction: DirectionKey) {
+    pub(super) fn navigate_results(&mut self, direction: DirectionKey) {
         let row_count = self.results.len();
         if row_count == 0 {
             self.status_line = "No buffered rows yet".to_string();
@@ -370,7 +370,7 @@ impl TuiApp {
         None
     }
 
-    fn populate_demo_results(&mut self) {
+    pub(super) fn populate_demo_results(&mut self) {
         self.results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
         self.results_cursor = 0;
         self.results_search_mode = false;
@@ -399,7 +399,7 @@ impl TuiApp {
         self.selection.column = Some("value".to_string());
     }
 
-    fn export_results(&mut self, format: myr_core::actions_engine::ExportFormat) {
+    pub(super) fn export_results(&mut self, format: myr_core::actions_engine::ExportFormat) {
         if !self.has_results || self.results.is_empty() {
             self.status_line = "No results available to export".to_string();
             return;
@@ -466,7 +466,7 @@ impl TuiApp {
         }
     }
 
-    fn save_current_bookmark(&mut self) {
+    pub(super) fn save_current_bookmark(&mut self) {
         let query_trimmed = self.query_editor_text.trim();
         if self.selection.table.is_none() && query_trimmed.is_empty() {
             self.status_line =
@@ -512,7 +512,7 @@ impl TuiApp {
         }
     }
 
-    fn open_next_bookmark(&mut self) {
+    pub(super) fn open_next_bookmark(&mut self) {
         let bookmarks = match self.bookmark_store.as_ref() {
             Some(store) => store.bookmarks().to_vec(),
             None => {
@@ -588,7 +588,7 @@ impl TuiApp {
         self.status_line = format!("Opened bookmark `{}`", bookmark.name);
     }
 
-    fn jump_to_next_related_table(&mut self) {
+    pub(super) fn jump_to_next_related_table(&mut self) {
         if self.schema_relationships.is_empty() {
             self.status_line = "No related tables discovered for the current selection".to_string();
             return;
@@ -644,30 +644,154 @@ impl TuiApp {
         );
     }
 
-    fn has_saved_bookmarks(&self) -> bool {
+    pub(super) fn has_saved_bookmarks(&self) -> bool {
         self.bookmark_store
             .as_ref()
             .is_some_and(|store| !store.bookmarks().is_empty())
     }
 
     pub(super) fn palette_entries(&self) -> Vec<ActionId> {
-        let query = self.palette_query.to_ascii_lowercase();
-        self.actions
-            .rank_top_n(&self.action_context(), 50)
+        let query = self.palette_query.trim().to_ascii_lowercase();
+        let ranked = self.actions.rank_top_n(&self.action_context(), 50);
+        if query.is_empty() {
+            return ranked.into_iter().map(|action| action.id).collect();
+        }
+
+        let mut matches = ranked
             .into_iter()
-            .filter(|action| {
-                if query.is_empty() {
-                    true
-                } else {
-                    action.title.to_ascii_lowercase().contains(&query)
-                }
+            .filter_map(|ranked_action| {
+                let metadata = self.actions.registry().find(ranked_action.id);
+                let title = ranked_action.title.to_ascii_lowercase();
+                let description = metadata
+                    .map_or("", |action| action.description)
+                    .to_ascii_lowercase();
+                let search_score = palette_match_score(
+                    query.as_str(),
+                    title.as_str(),
+                    description.as_str(),
+                    palette_aliases(ranked_action.id),
+                )?;
+                let combined_score = search_score * 10_000 + ranked_action.score;
+                Some((combined_score, ranked_action.title, ranked_action.id))
             })
-            .map(|action| action.id)
-            .collect()
+            .collect::<Vec<_>>();
+
+        matches.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.cmp(right.1))
+        });
+        matches.into_iter().map(|(_, _, action_id)| action_id).collect()
     }
 
     fn selected_palette_action(&self) -> Option<ActionId> {
         let entries = self.palette_entries();
         entries.get(self.palette_selection).copied()
     }
+}
+
+fn palette_aliases(action_id: ActionId) -> &'static [&'static str] {
+    match action_id {
+        ActionId::PreviewTable => &["preview", "peek", "sample", "pvw"],
+        ActionId::JumpToRelatedTable => &["fk", "foreign key", "relationship", "related"],
+        ActionId::PreviousPage => &["prev", "back", "page back"],
+        ActionId::NextPage => &["next", "forward", "more"],
+        ActionId::DescribeTable => &["describe", "desc", "columns", "schema"],
+        ActionId::ShowIndexes => &["index", "indexes", "keys"],
+        ActionId::ShowCreateTable => &["ddl", "create", "show create"],
+        ActionId::CountEstimate => &["count", "estimate", "rows"],
+        ActionId::RunCurrentQuery => &["run", "execute", "query"],
+        ActionId::ApplyLimit200 => &["limit", "cap rows", "preview limit"],
+        ActionId::ExplainQuery => &["explain", "plan", "query plan"],
+        ActionId::BuildFilterSortQuery => &["filter", "sort", "where", "order by"],
+        ActionId::InsertSelectSnippet => &["snippet", "select template"],
+        ActionId::InsertJoinSnippet => &["snippet", "join template"],
+        ActionId::CancelRunningQuery => &["cancel", "stop", "abort"],
+        ActionId::ExportCsv => &["csv", "export csv"],
+        ActionId::ExportJson => &["json", "export json"],
+        ActionId::ExportCsvGzip => &["csv.gz", "gzip csv", "compressed csv"],
+        ActionId::ExportJsonGzip => &["json.gz", "gzip json", "compressed json"],
+        ActionId::ExportJsonLines => &["jsonl", "ndjson", "json lines"],
+        ActionId::ExportJsonLinesGzip => &["jsonl.gz", "gzip jsonl", "compressed jsonl"],
+        ActionId::SaveBookmark => &["bookmark save", "save view", "favorite"],
+        ActionId::OpenBookmark => &["bookmark open", "open view", "load bookmark"],
+        ActionId::CopyCell => &["copy cell", "clipboard cell"],
+        ActionId::CopyRow => &["copy row", "clipboard row"],
+        ActionId::SearchResults => &["search", "find", "grep"],
+        ActionId::FocusQueryEditor => &["editor", "sql", "go query editor"],
+    }
+}
+
+fn palette_match_score(
+    query: &str,
+    title: &str,
+    description: &str,
+    aliases: &[&str],
+) -> Option<i32> {
+    let title_score = text_match_score(query, title).map(|score| score + 30);
+    let description_score = text_match_score(query, description);
+    let alias_score = aliases
+        .iter()
+        .filter_map(|alias| text_match_score(query, alias))
+        .max()
+        .map(|score| score + 15);
+    [title_score, description_score, alias_score]
+        .into_iter()
+        .flatten()
+        .max()
+}
+
+fn text_match_score(query: &str, text: &str) -> Option<i32> {
+    if query.is_empty() || text.is_empty() {
+        return None;
+    }
+    if text == query {
+        return Some(1_000);
+    }
+    if text.starts_with(query) {
+        return Some(900);
+    }
+    if text
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|word| !word.is_empty() && word.starts_with(query))
+    {
+        return Some(820);
+    }
+    if text.contains(query) {
+        return Some(760);
+    }
+    fuzzy_subsequence_score(query, text)
+}
+
+fn fuzzy_subsequence_score(query: &str, text: &str) -> Option<i32> {
+    let mut query_chars = query.chars();
+    let mut current = query_chars.next()?;
+    let mut matched = 0usize;
+    let mut previous_index = 0usize;
+    let mut gap_penalty = 0i32;
+
+    for (index, ch) in text.chars().enumerate() {
+        if ch != current {
+            continue;
+        }
+
+        if matched > 0 {
+            let gap = index.saturating_sub(previous_index + 1);
+            gap_penalty += i32::try_from(gap.min(12)).unwrap_or(12);
+        }
+
+        matched += 1;
+        previous_index = index;
+
+        if let Some(next) = query_chars.next() {
+            current = next;
+            continue;
+        }
+
+        let length_bonus = i32::try_from(query.chars().count().min(12)).unwrap_or(12) * 8;
+        return Some((620 + length_bonus - gap_penalty).max(500));
+    }
+
+    None
 }

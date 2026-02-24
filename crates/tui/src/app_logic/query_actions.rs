@@ -1,5 +1,5 @@
 impl TuiApp {
-    fn invoke_action(&mut self, action_id: ActionId) {
+    pub(super) fn invoke_action(&mut self, action_id: ActionId) {
         let context = self.action_context();
         match self.actions.invoke(action_id, &context) {
             Ok(invocation) => self.apply_invocation(action_id, invocation),
@@ -141,7 +141,7 @@ impl TuiApp {
         }
     }
 
-    fn start_preview_paged_query(&mut self, fallback_sql: String) {
+    pub(super) fn start_preview_paged_query(&mut self, fallback_sql: String) {
         let Some(state) = self.build_preview_pagination_state() else {
             self.clear_pagination_state();
             self.execute_sql_with_guard(fallback_sql);
@@ -335,7 +335,7 @@ impl TuiApp {
         (true, can_page_next, can_page_previous)
     }
 
-    fn apply_invocation(&mut self, action_id: ActionId, invocation: ActionInvocation) {
+    pub(super) fn apply_invocation(&mut self, action_id: ActionId, invocation: ActionInvocation) {
         match invocation {
             ActionInvocation::RunSql(sql) => {
                 if action_id == ActionId::PreviewTable {
@@ -439,7 +439,7 @@ impl TuiApp {
         }
     }
 
-    fn open_error_panel(
+    pub(super) fn open_error_panel(
         &mut self,
         kind: ErrorKind,
         title: impl Into<String>,

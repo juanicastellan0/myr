@@ -184,7 +184,7 @@ impl TuiApp {
         }
     }
 
-    fn on_tick(&mut self) {
+    pub(super) fn on_tick(&mut self) {
         self.loading_tick = self.loading_tick.wrapping_add(1);
         self.pane_flash_ticks = self.pane_flash_ticks.saturating_sub(1);
         self.poll_connect_result();
@@ -243,7 +243,7 @@ impl TuiApp {
         }
     }
 
-    fn submit(&mut self) {
+    pub(super) fn submit(&mut self) {
         if self.show_palette {
             if let Some(action_id) = self.selected_palette_action() {
                 self.invoke_action(action_id);
@@ -297,7 +297,7 @@ impl TuiApp {
         }
     }
 
-    fn connect_from_wizard(&mut self) {
+    pub(super) fn connect_from_wizard(&mut self) {
         let profile = match self.wizard_profile() {
             Ok(profile) => profile,
             Err(error) => {
@@ -440,7 +440,7 @@ impl TuiApp {
         }
     }
 
-    fn apply_connected_profile(
+    pub(super) fn apply_connected_profile(
         &mut self,
         profile: ConnectionProfile,
         connect_latency: Duration,
@@ -519,7 +519,7 @@ impl TuiApp {
         self.status_line = status;
     }
 
-    fn poll_query_result(&mut self) {
+    pub(super) fn poll_query_result(&mut self) {
         let outcome = match self.query_result_rx.as_ref() {
             Some(receiver) => match receiver.try_recv() {
                 Ok(outcome) => Some(outcome),

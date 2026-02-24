@@ -168,6 +168,20 @@ Expected:
 - Snippets are inserted into the editor at the current cursor position.
 - App keeps focus on Query Editor and status line reports snippet insertion.
 
+### Command Palette Fuzzy/Alias Search
+
+Steps:
+
+1. Open command palette (`Ctrl+P`) from Schema Explorer.
+2. Type `pvw` and confirm `Preview table` is shown as a top match.
+3. Clear query and type `ddl`; confirm `Show create table` is shown.
+4. Clear query and type `fk`; confirm `Jump to related table` is shown.
+
+Expected:
+
+- Palette matches actions even when query is not a direct substring.
+- Action aliases/keywords map to intended actions (`pvw`, `ddl`, `fk`).
+
 ## Guided Query Actions
 
 ### Server-side Filter/Sort Builder

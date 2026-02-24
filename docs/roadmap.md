@@ -56,7 +56,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 - [ ] Query editor v2:
   - Explicit cursor row/column ruler and active SQL region emphasis.
   - Improved multiline ergonomics for long statements.
-- [ ] Command palette search v2:
+- [x] Command palette search v2:
   - Fuzzy match with ranking by score + recency + context.
   - Action aliases/keywords (`ddl`, `export`, `bookmark`, etc.).
 - [ ] Profile/bookmark manager screen:
