@@ -1,62 +1,111 @@
 # Roadmap
 
-## M0: Project bootstrap
+## Completed Baseline (M0-M8)
 
-- [x] Cargo workspace and crate layout
-- [x] Baseline CI quality checks
-- [x] OSS docs and policies
+All M0-M8 milestones are complete (bootstrap, explorer, guided actions, pagination/perf, reliability, query UX, security, and power-user workflows).
 
-## M1: Explorer MVP
+## Deep Analysis Snapshot (2026-02-24)
 
-- [x] Connection profiles and connection wizard (initial implementation)
-- [x] Schema explorer (databases, tables, columns)
-- [x] Table preview action
-- [x] Streaming results with bounded buffer
-- [x] Context-aware next actions footer
+### Current State
 
-## M2: Guided exploration
+- Product scope is broad and coherent: connect -> explore schema -> run/shape queries -> page/search/export -> recover from failures.
+- Delivery quality gates are in place: fmt, clippy, tests, build, coverage gate, perf smoke, and cross-platform CI.
+- Test volume is solid (`129` Rust tests), with adapter and TUI MySQL-gated integration paths.
 
-- [x] Command palette (search + keyboard invoke; fuzzy scoring can be improved)
-- [x] Safe mode confirmation flow (core guard implemented)
-- [x] Export CSV/JSON
-- [x] Describe/index/show-create actions
+### Engineering Shape
 
-## M3: Big-table competence
+- Codebase size is moderate (`~10.9k` Rust LOC) and still moving quickly.
+- Remaining concentration risk is in a handful of files:
+  - `crates/tui/src/app_logic/navigation.rs` (673)
+  - `crates/tui/src/app_logic/runtime.rs` (653)
+  - `crates/tui/src/app_logic/query_actions.rs` (551)
+  - `app/src/bin/benchmark.rs` (620)
+  - `crates/core/src/schema_cache.rs` (442)
+- TUI rendering and core action engine were recently decomposed, reducing single-file blast radius.
 
-- [x] Pagination strategy (keyset + fallback)
-- [x] Performance instrumentation overlay
-- [x] Benchmark scripts and regression checks
+### Key Gaps and Risks
 
-## M4: Stable release
+- UX gaps:
+  - Results table readability still relies on text rendering; no horizontal scroll/frozen headers.
+  - Command palette filter is substring-based only (no fuzzy ranking/aliases).
+  - Profile/bookmark management is functional but lacks a dedicated management UI.
+- Reliability gaps:
+  - `unwrap()` remains in adapter row conversion path and should be removed from runtime code.
+  - Recovery/retry flows are strong but failure-injection coverage can be expanded.
+- Docs/architecture gaps:
+  - Architecture notes and action engine extension docs are still missing (`docs/README.md` planned additions).
+- Platform/distribution gaps:
+  - Release artifacts are x86_64-only; no arm64 distribution target yet.
+  - CI integration matrix focuses on MySQL; MariaDB compatibility is not yet gated.
 
-- [x] Packaging hardening
-- [x] Cross-platform validation
-- [x] Documentation completion
+### Priorities
 
-## M5: Reliability and recovery
+- P0: Maintainability and reliability hardening.
+- P1: Query/results UX and discoverability.
+- P2: Compatibility/distribution expansion.
 
-- [x] Fix connection/query lifecycle regressions (`Pool was disconnect`) with regression tests
-- [x] Auto-reconnect flow with explicit UI state transitions
-- [x] Query timeout + retry policy for transient network failures
-- [x] Structured error panel with actionable recovery guidance
+## M9: UX Clarity and Discoverability
 
-## M6: Query UX and guided exploration
+- [ ] Results table v2:
+  - Horizontal scroll and viewport indicator.
+  - Sticky header row + clearer selected-row/selected-column emphasis.
+  - Better width strategy for long text/JSON cells.
+- [ ] Schema explorer v2:
+  - Filter-as-you-type for database/table/column lists.
+  - Optional compact/full metadata view for columns.
+- [ ] Query editor v2:
+  - Explicit cursor row/column ruler and active SQL region emphasis.
+  - Improved multiline ergonomics for long statements.
+- [ ] Command palette search v2:
+  - Fuzzy match with ranking by score + recency + context.
+  - Action aliases/keywords (`ddl`, `export`, `bookmark`, etc.).
+- [ ] Profile/bookmark manager screen:
+  - List/select/rename/delete.
+  - Mark default profile and quick reconnect target.
 
-- [x] Implement real buffered-results search action (replace placeholder)
-- [x] Upgrade query editor usability (multiline edit, movement, history, snippets)
-- [x] Add server-side filter/sort builder from selected schema target
-- [x] Add `EXPLAIN`/preflight action for heavy queries
+## M10: Reliability and Safety Hardening (Post-M8)
 
-## M7: Security and safety hardening
+- [ ] Remove panic paths from runtime code (`unwrap` -> typed error propagation).
+- [ ] Expand reconnect/cancel/timeout failure-injection tests.
+- [ ] Add audit trail rotation/retention options with safe defaults.
+- [ ] Tighten read-only guard coverage for edge SQL patterns (transaction + mixed statements).
+- [ ] Add explicit health diagnostics command/action (`connection + schema + query smoke`).
 
-- [x] Optional secure password storage (OS keyring) in addition to env vars
-- [x] Expanded TLS support (CA/cert/key + identity verification options)
-- [x] Explicit read-only profile mode guard
-- [x] SQL audit trail with profile + timestamp metadata
+## M11: Architecture and Dev Velocity
 
-## M8: Power-user workflows and scale
+- [ ] Split remaining large files by bounded context:
+  - TUI `runtime`, `navigation`, `query_actions`
+  - core `schema_cache`
+  - app `benchmark`
+- [ ] Move TUI state/data model types out of `crates/tui/src/lib.rs` into dedicated modules.
+- [ ] Add architecture documentation:
+  - Event loop and message flow.
+  - Worker lifecycle (connect/query threads + cancellation).
+  - Action engine invocation path.
+- [ ] Add "Action Engine Extension Guide" (new action checklist + test strategy).
 
-- [x] Foreign-key relationship navigation (jump across related tables)
-- [x] Saved views/bookmarks for schema targets and queries
-- [x] Extended export options (streaming JSON/CSV improvements, compressed output)
-- [x] Perf trend tracking in CI for regression detection over time
+## M12: Quality and Compatibility Expansion
+
+- [ ] Add MariaDB integration lane in CI.
+- [ ] Add optional keyring smoke checks for linux/macos/windows runners.
+- [ ] Add rendering snapshot-style tests for key panes/popups.
+- [ ] Raise coverage gate from `80%` to `85%` once flaky/low-value tests are addressed.
+- [ ] Define benchmark trend guard policy (baseline file + tolerance windows).
+
+## M13: Distribution and Adoption
+
+- [ ] Build and publish arm64 artifacts (`linux-aarch64`, `macos-aarch64`).
+- [ ] Add install channels (Homebrew tap and Scoop manifest).
+- [ ] Add non-interactive CLI entrypoints for scripting:
+  - `myr-app query --sql ...`
+  - `myr-app export --format ...`
+  - `myr-app doctor`
+- [ ] Add config/profile migration helper for forward-compatible upgrades.
+
+## Next Up (Proposed Execution Order)
+
+- [ ] Remove adapter panic path + add regression test.
+- [ ] Implement palette fuzzy ranking with aliases.
+- [ ] Add results horizontal scrolling and sticky headers.
+- [ ] Add architecture notes in `docs/architecture.md`.
+- [ ] Split `app/src/bin/benchmark.rs` into parser/runner/report modules.
