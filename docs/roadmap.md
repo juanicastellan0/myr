@@ -74,9 +74,9 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 
 ## M11: Architecture and Dev Velocity
 
-- [ ] Split remaining large files by bounded context:
+- [x] Split remaining large files by bounded context:
   - [x] TUI `runtime` (split into handle/connect/query runtime modules)
-  - [ ] TUI `navigation`
+  - [x] TUI `navigation`
   - [x] TUI `query_actions` (split action dispatch, query execution, pagination, and error panel modules)
   - [x] core `schema_cache` (split cache service, relationships, and schema types)
   - [x] app `benchmark` (split into parser/runner/report modules)
