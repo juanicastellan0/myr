@@ -66,10 +66,10 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 
 ## M10: Reliability and Safety Hardening (Post-M8)
 
-- [ ] Remove panic paths from runtime code (`unwrap` -> typed error propagation).
-- [ ] Expand reconnect/cancel/timeout failure-injection tests.
+- [x] Remove panic paths from runtime code (`unwrap` -> typed error propagation).
+- [x] Expand reconnect/cancel/timeout failure-injection tests.
+- [x] Tighten read-only guard coverage for edge SQL patterns (transaction + mixed statements).
 - [ ] Add audit trail rotation/retention options with safe defaults.
-- [ ] Tighten read-only guard coverage for edge SQL patterns (transaction + mixed statements).
 - [ ] Add explicit health diagnostics command/action (`connection + schema + query smoke`).
 
 ## M11: Architecture and Dev Velocity
@@ -105,6 +105,6 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 
 ## Next Up (Proposed Execution Order)
 
-- [ ] Remove adapter panic path + add regression test.
+- [ ] Add audit trail rotation/retention options with safe defaults.
 - [ ] Add architecture notes in `docs/architecture.md`.
 - [ ] Split `app/src/bin/benchmark.rs` into parser/runner/report modules.

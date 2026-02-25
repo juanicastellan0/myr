@@ -831,6 +831,54 @@ fn read_only_profile_blocks_destructive_submit() {
 }
 
 #[test]
+fn read_only_profile_blocks_transaction_control_submit() {
+    let mut app = app_in_pane(Pane::QueryEditor);
+    let mut profile = ConnectionProfile::new(
+        "local-ro".to_string(),
+        "127.0.0.1".to_string(),
+        "root".to_string(),
+    );
+    profile.read_only = true;
+    app.active_connection_profile = Some(profile.clone());
+    app.last_connect_profile = Some(profile);
+    app.query_editor_text = "BEGIN; SELECT * FROM `app`.`users`; COMMIT;".to_string();
+
+    app.submit();
+
+    assert!(!app.query_running);
+    assert!(app.pending_confirmation.is_none());
+    assert_eq!(
+        app.status_line,
+        "Blocked by read-only profile mode: write/DDL SQL is disabled"
+    );
+}
+
+#[test]
+fn read_only_profile_blocks_mixed_read_write_submit() {
+    let mut app = app_in_pane(Pane::QueryEditor);
+    let mut profile = ConnectionProfile::new(
+        "local-ro".to_string(),
+        "127.0.0.1".to_string(),
+        "root".to_string(),
+    );
+    profile.read_only = true;
+    app.active_connection_profile = Some(profile.clone());
+    app.last_connect_profile = Some(profile);
+    app.query_editor_text =
+        "SELECT id FROM `app`.`users`; UPDATE `app`.`users` SET email = 'x' WHERE id = 1"
+            .to_string();
+
+    app.submit();
+
+    assert!(!app.query_running);
+    assert!(app.pending_confirmation.is_none());
+    assert_eq!(
+        app.status_line,
+        "Blocked by read-only profile mode: write/DDL SQL is disabled"
+    );
+}
+
+#[test]
 fn query_failure_retries_once_when_transient() {
     let mut app = app_in_pane(Pane::QueryEditor);
     app.query_running = true;
@@ -848,6 +896,47 @@ fn query_failure_retries_once_when_transient() {
     assert!(app.query_running);
     assert_eq!(app.query_retry_attempts, 1);
     assert!(app.status_line.starts_with("Running query"));
+}
+
+#[test]
+fn query_timeout_failure_retries_once_when_not_cancelled() {
+    let mut app = app_in_pane(Pane::QueryEditor);
+    app.query_running = true;
+    app.inflight_query_sql = Some("SELECT 1".to_string());
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.query_result_rx = Some(rx);
+    tx.send(QueryWorkerOutcome::Failure(
+        "query timed out after 20s".to_string(),
+    ))
+    .expect("send timeout query failure");
+
+    app.poll_query_result();
+
+    assert!(app.query_running);
+    assert_eq!(app.query_retry_attempts, 1);
+    assert!(app.status_line.starts_with("Running query"));
+}
+
+#[test]
+fn query_failure_does_not_retry_when_cancel_was_requested() {
+    let mut app = app_in_pane(Pane::QueryEditor);
+    app.query_running = true;
+    app.cancel_requested = true;
+    app.inflight_query_sql = Some("SELECT 1".to_string());
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.query_result_rx = Some(rx);
+    tx.send(QueryWorkerOutcome::Failure(
+        "connection reset by peer".to_string(),
+    ))
+    .expect("send query failure while cancelling");
+
+    app.poll_query_result();
+
+    assert!(!app.query_running);
+    assert_eq!(app.query_retry_attempts, 0);
+    assert_eq!(app.status_line, "Query failed: connection reset by peer");
 }
 
 #[test]
@@ -877,6 +966,27 @@ fn query_failure_starts_auto_reconnect_when_connection_is_lost() {
     assert!(app.connect_requested);
     assert_eq!(app.connect_intent, ConnectIntent::AutoReconnect);
     assert_eq!(app.pending_retry_query.as_deref(), Some("SELECT 1"));
+}
+
+#[test]
+fn query_worker_disconnection_opens_query_error_panel() {
+    let mut app = app_in_pane(Pane::QueryEditor);
+    app.query_running = true;
+    app.inflight_query_sql = Some("SELECT 1".to_string());
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.query_result_rx = Some(rx);
+    drop(tx);
+
+    app.poll_query_result();
+
+    assert!(!app.query_running);
+    assert_eq!(app.status_line, "Query failed: query worker disconnected");
+    let panel = app.error_panel.as_ref().expect("query error panel");
+    assert_eq!(panel.kind, ErrorKind::Query);
+    assert_eq!(panel.title, "Query Error");
+    assert_eq!(panel.summary, "Query execution failed");
+    assert_eq!(panel.detail, "query worker disconnected");
 }
 
 #[test]
@@ -1380,6 +1490,29 @@ fn connect_from_wizard_handles_connect_failure_path() {
     drive_connect_to_completion(&mut app);
     assert!(!app.connect_requested);
     assert!(app.status_line.starts_with("Connect failed:"));
+}
+
+#[test]
+fn connect_worker_disconnection_opens_connection_error_panel() {
+    let mut app = app_in_pane(Pane::ConnectionWizard);
+    app.connect_requested = true;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.connect_result_rx = Some(rx);
+    drop(tx);
+
+    app.on_tick();
+
+    assert!(!app.connect_requested);
+    assert_eq!(
+        app.status_line,
+        "Connect failed: connect worker disconnected"
+    );
+    let panel = app.error_panel.as_ref().expect("connection error panel");
+    assert_eq!(panel.kind, ErrorKind::Connection);
+    assert_eq!(panel.title, "Connection Error");
+    assert_eq!(panel.summary, "Connection attempt failed");
+    assert_eq!(panel.detail, "connect worker disconnected");
 }
 
 #[test]

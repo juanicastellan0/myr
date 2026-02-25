@@ -175,7 +175,7 @@ impl QueryRowStream for MysqlStreamingRowStream {
         };
 
         match stream.next().await {
-            Some(Ok(row)) => Ok(Some(row_to_query_row(row))),
+            Some(Ok(row)) => row_to_query_row(row).map(Some),
             Some(Err(error)) => Err(to_query_error(error)),
             None => {
                 self.stream = None;
@@ -342,13 +342,22 @@ fn keyring_entry(profile: &ConnectionProfile) -> Option<keyring::Entry> {
     keyring::Entry::new(service, account).ok()
 }
 
-fn row_to_query_row(row: Row) -> QueryRow {
-    let values = row
-        .unwrap()
+fn row_to_query_row(row: Row) -> Result<QueryRow, QueryBackendError> {
+    row_values_to_strings(row.unwrap_raw()).map(QueryRow::new)
+}
+
+fn row_values_to_strings(values: Vec<Option<Value>>) -> Result<Vec<String>, QueryBackendError> {
+    values
         .into_iter()
-        .map(mysql_value_to_string)
-        .collect::<Vec<_>>();
-    QueryRow::new(values)
+        .enumerate()
+        .map(|(index, value)| {
+            value.map(mysql_value_to_string).ok_or_else(|| {
+                QueryBackendError::new(format!(
+                    "row decoding failed: missing value at column index {index}"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn mysql_value_to_string(value: Value) -> String {
@@ -392,7 +401,7 @@ mod tests {
 
     use super::{
         client_identity_from_profile, mysql_value_to_string, opts_from_profile,
-        profile_requests_tls,
+        profile_requests_tls, row_values_to_strings,
     };
 
     #[test]
@@ -404,6 +413,16 @@ mod tests {
         );
         assert_eq!(mysql_value_to_string(Value::Int(-8)), "-8");
         assert_eq!(mysql_value_to_string(Value::UInt(8)), "8");
+    }
+
+    #[test]
+    fn row_value_mapping_reports_missing_columns_without_panicking() {
+        let error = row_values_to_strings(vec![Some(Value::Int(1)), None])
+            .expect_err("missing row values should return an error");
+        assert_eq!(
+            error.to_string(),
+            "row decoding failed: missing value at column index 1"
+        );
     }
 
     #[test]

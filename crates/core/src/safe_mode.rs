@@ -345,6 +345,27 @@ mod tests {
     }
 
     #[test]
+    fn transaction_control_statements_are_marked_risky() {
+        let assessment = assess_sql_safety("BEGIN; SELECT * FROM users; COMMIT;");
+        assert!(assessment.reasons.contains(&SqlRiskReason::MultiStatement));
+        assert!(assessment
+            .reasons
+            .contains(&SqlRiskReason::TransactionControl("BEGIN".to_string())));
+        assert!(assessment
+            .reasons
+            .contains(&SqlRiskReason::TransactionControl("COMMIT".to_string())));
+    }
+
+    #[test]
+    fn mixed_read_write_multi_statement_is_marked_with_write_reason() {
+        let assessment = assess_sql_safety("SELECT * FROM users; UPDATE users SET admin = 1");
+        assert!(assessment.reasons.contains(&SqlRiskReason::MultiStatement));
+        assert!(assessment
+            .reasons
+            .contains(&SqlRiskReason::WriteOperation("UPDATE".to_string())));
+    }
+
+    #[test]
     fn ignores_comments_when_classifying_sql() {
         let assessment = assess_sql_safety(
             r#"
