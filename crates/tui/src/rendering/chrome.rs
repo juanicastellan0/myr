@@ -164,7 +164,8 @@ pub(super) fn footer_line(app: &TuiApp) -> String {
     if app.pane == Pane::ConnectionWizard {
         "F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit".to_string()
     } else if app.pane == Pane::ProfileBookmarks {
-        "Enter: open selection | Del: delete selection | F6: wizard | F7: manager".to_string()
+        "F5: connect | Enter: open/save | Del: delete | r:rename d:default q:quick | F6/F7"
+            .to_string()
     } else {
         let actions = app
             .actions

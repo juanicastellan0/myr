@@ -12,6 +12,7 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
         Line::from("Connection wizard: E/Enter edit, F5 connect"),
+        Line::from("Profiles manager: F5 connect, r rename, d default, q quick reconnect"),
         Line::from("Query editor: Enter run, Ctrl+Enter newline"),
         Line::from("Query editor: Left/Right cursor, Up/Down history"),
         Line::from("F2: toggle perf overlay"),

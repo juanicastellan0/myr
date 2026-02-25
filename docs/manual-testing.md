@@ -286,13 +286,20 @@ Steps:
 1. Press `F7` to open the `Profiles & Bookmarks` pane.
 2. In `Profiles` lane, use `Up`/`Down` and press `Enter` on a profile.
 3. Confirm app returns to Connection Wizard with profile fields loaded.
-4. Press `F7` again, move to `Bookmarks` lane (`Right`), select a bookmark, and press `Enter`.
-5. Press `F7` and use `Del` on a selected bookmark entry.
+4. Press `F7`, select a profile, press `r`, type a new name, then press `Enter` to save rename.
+5. In `Profiles` lane, press `d` on a profile to mark default.
+6. In `Profiles` lane, press `q` on a profile to mark quick reconnect target.
+7. Move to `Bookmarks` lane (`Right`) and press `F5`.
+8. Select a bookmark and press `Enter` to open it.
+9. Press `Del` on a selected bookmark entry.
 
 Expected:
 
 - Manager pane shows both profile and bookmark lists with focused lane indicator.
 - Opening a profile loads it into Connection Wizard for quick reconnect (`F5`).
+- Rename mode shows inline input with `Enter` save and `Esc` cancel behavior.
+- Profile list row shows `[default]` and/or `[quick]` marker tags when set.
+- Pressing `F5` from manager connects using selected profile (Profiles lane) or quick reconnect target (Bookmarks lane fallback).
 - Opening a bookmark restores its selection/query target.
 - `Del` removes selected entry and persists updated store file.
 

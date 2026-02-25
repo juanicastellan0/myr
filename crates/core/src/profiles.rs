@@ -54,6 +54,10 @@ pub struct ConnectionProfile {
     pub tls_hostname_override: Option<String>,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub quick_reconnect: bool,
 }
 
 impl ConnectionProfile {
@@ -77,6 +81,8 @@ impl ConnectionProfile {
             tls_accept_invalid_certs: false,
             tls_hostname_override: None,
             read_only: false,
+            is_default: false,
+            quick_reconnect: false,
         }
     }
 }
@@ -193,6 +199,16 @@ impl FileProfilesStore {
         self.profiles.iter().find(|profile| profile.name == name)
     }
 
+    #[must_use]
+    pub fn default_profile(&self) -> Option<&ConnectionProfile> {
+        self.profiles.iter().find(|profile| profile.is_default)
+    }
+
+    #[must_use]
+    pub fn quick_reconnect_profile(&self) -> Option<&ConnectionProfile> {
+        self.profiles.iter().find(|profile| profile.quick_reconnect)
+    }
+
     pub fn upsert_profile(&mut self, profile: ConnectionProfile) {
         if let Some(existing) = self
             .profiles
@@ -204,6 +220,30 @@ impl FileProfilesStore {
             self.profiles.push(profile);
             self.profiles.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         }
+    }
+
+    #[must_use]
+    pub fn set_default_profile(&mut self, name: &str) -> bool {
+        if !self.profiles.iter().any(|profile| profile.name == name) {
+            return false;
+        }
+
+        for profile in &mut self.profiles {
+            profile.is_default = profile.name == name;
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn set_quick_reconnect_profile(&mut self, name: &str) -> bool {
+        if !self.profiles.iter().any(|profile| profile.name == name) {
+            return false;
+        }
+
+        for profile in &mut self.profiles {
+            profile.quick_reconnect = profile.name == name;
+        }
+        true
     }
 
     #[must_use]
@@ -310,5 +350,51 @@ mod tests {
         let reloaded = FileProfilesStore::load_from_path(path).expect("failed final reload");
         assert!(reloaded.profile("local").is_none());
         assert!(reloaded.profiles().is_empty());
+    }
+
+    #[test]
+    fn default_and_quick_reconnect_profile_markers_are_exclusive() {
+        let temp_dir = TempDir::new().expect("failed to create temp directory");
+        let path = temp_profiles_path(&temp_dir);
+
+        let mut store = FileProfilesStore::load_from_path(&path).expect("failed to load store");
+        let local = ConnectionProfile::new("local", "127.0.0.1", "root");
+        let prod = ConnectionProfile::new("prod", "10.0.0.8", "app");
+        store.upsert_profile(local);
+        store.upsert_profile(prod);
+
+        assert!(store.set_default_profile("prod"));
+        assert!(store.set_quick_reconnect_profile("local"));
+        store.persist().expect("failed to persist store");
+
+        let reloaded = FileProfilesStore::load_from_path(path).expect("failed to reload store");
+        assert_eq!(
+            reloaded
+                .default_profile()
+                .map(|profile| profile.name.as_str()),
+            Some("prod")
+        );
+        assert_eq!(
+            reloaded
+                .quick_reconnect_profile()
+                .map(|profile| profile.name.as_str()),
+            Some("local")
+        );
+        assert_eq!(
+            reloaded
+                .profiles()
+                .iter()
+                .filter(|profile| profile.is_default)
+                .count(),
+            1
+        );
+        assert_eq!(
+            reloaded
+                .profiles()
+                .iter()
+                .filter(|profile| profile.quick_reconnect)
+                .count(),
+            1
+        );
     }
 }

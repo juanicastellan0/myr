@@ -20,6 +20,8 @@ impl TuiApp {
             }
         } else if self.pane == Pane::SchemaExplorer {
             self.append_schema_filter_char(ch);
+        } else if self.pane == Pane::ProfileBookmarks {
+            self.handle_manager_input_char(ch);
         } else if self.pane == Pane::QueryEditor {
             self.insert_text_at_query_cursor(&ch.to_string());
             self.status_line = "Query text updated".to_string();
@@ -56,6 +58,8 @@ impl TuiApp {
             }
         } else if self.pane == Pane::SchemaExplorer {
             self.backspace_schema_filter();
+        } else if self.pane == Pane::ProfileBookmarks {
+            self.handle_manager_backspace();
         } else if self.pane == Pane::QueryEditor {
             self.backspace_query_editor_char();
             self.status_line = "Query text updated".to_string();
@@ -79,6 +83,8 @@ impl TuiApp {
             }
         } else if self.pane == Pane::SchemaExplorer {
             self.clear_schema_filter();
+        } else if self.pane == Pane::ProfileBookmarks {
+            self.clear_manager_rename_buffer();
         } else if self.pane == Pane::QueryEditor {
             self.query_editor_text.clear();
             self.query_cursor = 0;

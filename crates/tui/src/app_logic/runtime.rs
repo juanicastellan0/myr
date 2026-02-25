@@ -88,6 +88,10 @@ impl TuiApp {
                     self.cancel_wizard_edit();
                     return;
                 }
+                if self.pane == Pane::ProfileBookmarks && self.manager_rename_mode {
+                    self.cancel_manager_rename();
+                    return;
+                }
                 self.show_palette = !self.show_palette;
                 if self.show_palette {
                     self.palette_query.clear();
@@ -300,8 +304,14 @@ impl TuiApp {
             } else {
                 self.connect_from_wizard();
             }
+        } else if self.pane == Pane::ProfileBookmarks {
+            if self.connect_requested {
+                self.status_line = "Already connecting...".to_string();
+            } else {
+                self.connect_from_manager();
+            }
         } else {
-            self.status_line = "Connect is only available in connection wizard".to_string();
+            self.status_line = "Connect is available in wizard or profiles manager".to_string();
         }
     }
 
@@ -514,14 +524,24 @@ impl TuiApp {
 
         match self.profile_store.as_mut() {
             Some(store) => {
-                store.upsert_profile(profile.clone());
+                let mut profile_to_save = profile.clone();
+                if let Some(existing) = store.profile(profile.name.as_str()) {
+                    profile_to_save.is_default = existing.is_default;
+                    profile_to_save.quick_reconnect = existing.quick_reconnect;
+                }
+                store.upsert_profile(profile_to_save);
                 if let Err(error) = store.persist() {
                     notes.push(format!("profile save failed: {error}"));
                 }
             }
             None => match FileProfilesStore::load_default() {
                 Ok(mut store) => {
-                    store.upsert_profile(profile.clone());
+                    let mut profile_to_save = profile.clone();
+                    if let Some(existing) = store.profile(profile.name.as_str()) {
+                        profile_to_save.is_default = existing.is_default;
+                        profile_to_save.quick_reconnect = existing.quick_reconnect;
+                    }
+                    store.upsert_profile(profile_to_save);
                     if let Err(error) = store.persist() {
                         notes.push(format!("profile save failed: {error}"));
                     }

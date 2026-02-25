@@ -622,6 +622,129 @@ fn manager_can_open_and_delete_profiles_and_bookmarks() {
 }
 
 #[test]
+fn manager_can_rename_profile_and_update_connection_references() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let mut app = app_with_manager_stores(Pane::SchemaExplorer, &temp_dir);
+
+    let mut profile = ConnectionProfile::new("qa-profile", "127.0.0.1", "root");
+    profile.port = 33306;
+    {
+        let store = app.profile_store.as_mut().expect("profile store");
+        store.upsert_profile(profile.clone());
+        store.persist().expect("persist profile store");
+    }
+
+    app.connected_profile = Some("qa-profile".to_string());
+    app.last_connect_profile = Some(profile.clone());
+    app.active_connection_profile = Some(profile);
+    app.wizard_form.profile_name = "qa-profile".to_string();
+
+    app.handle(Msg::GoProfileBookmarkManager);
+    app.handle(Msg::InputChar('r'));
+    assert!(app.manager_rename_mode);
+
+    app.handle(Msg::ClearInput);
+    for ch in "qa-renamed".chars() {
+        app.handle(Msg::InputChar(ch));
+    }
+    app.handle(Msg::Submit);
+
+    assert!(!app.manager_rename_mode);
+    assert!(app.status_line.starts_with("Renamed profile"));
+
+    let store = app.profile_store.as_ref().expect("profile store");
+    assert!(store.profile("qa-profile").is_none());
+    assert!(store.profile("qa-renamed").is_some());
+    assert_eq!(app.connected_profile.as_deref(), Some("qa-renamed"));
+    assert_eq!(
+        app.last_connect_profile
+            .as_ref()
+            .map(|saved| saved.name.as_str()),
+        Some("qa-renamed")
+    );
+    assert_eq!(
+        app.active_connection_profile
+            .as_ref()
+            .map(|saved| saved.name.as_str()),
+        Some("qa-renamed")
+    );
+    assert_eq!(app.wizard_form.profile_name, "qa-renamed");
+}
+
+#[test]
+fn manager_shortcuts_mark_default_and_quick_reconnect_profiles() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let mut app = app_with_manager_stores(Pane::SchemaExplorer, &temp_dir);
+
+    let alpha = ConnectionProfile::new("alpha", "127.0.0.1", "root");
+    let beta = ConnectionProfile::new("beta", "127.0.0.1", "root");
+    {
+        let store = app.profile_store.as_mut().expect("profile store");
+        store.upsert_profile(alpha);
+        store.upsert_profile(beta);
+        store.persist().expect("persist profile store");
+    }
+
+    app.handle(Msg::GoProfileBookmarkManager);
+    app.navigate(DirectionKey::Down);
+    app.handle(Msg::InputChar('d'));
+    app.handle(Msg::InputChar('q'));
+
+    let store = app.profile_store.as_ref().expect("profile store");
+    assert_eq!(
+        store.default_profile().map(|profile| profile.name.as_str()),
+        Some("beta")
+    );
+    assert_eq!(
+        store
+            .quick_reconnect_profile()
+            .map(|profile| profile.name.as_str()),
+        Some("beta")
+    );
+}
+
+#[test]
+fn manager_connect_prefers_quick_reconnect_profile_from_bookmarks_lane() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let mut app = app_with_manager_stores(Pane::SchemaExplorer, &temp_dir);
+
+    let mut alpha = ConnectionProfile::new("alpha", "127.0.0.1", "root");
+    alpha.port = 1;
+    let mut beta = ConnectionProfile::new("beta", "127.0.0.1", "root");
+    beta.port = 2;
+
+    let mut bookmark = SavedBookmark::new("alpha:myr_bench.events");
+    bookmark.profile_name = Some("alpha".to_string());
+    bookmark.database = Some("myr_bench".to_string());
+    bookmark.table = Some("events".to_string());
+
+    {
+        let store = app.profile_store.as_mut().expect("profile store");
+        store.upsert_profile(alpha);
+        store.upsert_profile(beta);
+        assert!(store.set_quick_reconnect_profile("beta"));
+        store.persist().expect("persist profile store");
+    }
+    {
+        let store = app.bookmark_store.as_mut().expect("bookmark store");
+        store.upsert_bookmark(bookmark);
+        store.persist().expect("persist bookmark store");
+    }
+
+    app.handle(Msg::GoProfileBookmarkManager);
+    app.navigate(DirectionKey::Right);
+    app.handle(Msg::Connect);
+
+    assert_eq!(
+        app.last_connect_profile
+            .as_ref()
+            .map(|profile| profile.name.as_str()),
+        Some("beta")
+    );
+    drive_connect_to_completion(&mut app);
+}
+
+#[test]
 fn key_column_candidate_prefers_id_then_suffix() {
     let columns = vec![
         "created_at".to_string(),
@@ -1280,6 +1403,38 @@ fn apply_connected_profile_resets_schema_filters() {
 }
 
 #[test]
+fn apply_connected_profile_preserves_default_and_quick_markers() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let mut app = app_with_manager_stores(Pane::SchemaExplorer, &temp_dir);
+
+    let mut stored = ConnectionProfile::new("local-dev", "127.0.0.1", "root");
+    stored.is_default = true;
+    stored.quick_reconnect = true;
+    {
+        let store = app.profile_store.as_mut().expect("profile store");
+        store.upsert_profile(stored);
+        store.persist().expect("persist profile store");
+    }
+
+    let incoming = ConnectionProfile::new("local-dev", "127.0.0.1", "root");
+    app.apply_connected_profile(
+        incoming,
+        Duration::from_millis(1),
+        vec!["myr_bench".to_string()],
+        None,
+    );
+
+    let persisted = app
+        .profile_store
+        .as_ref()
+        .expect("profile store")
+        .profile("local-dev")
+        .expect("persisted profile");
+    assert!(persisted.is_default);
+    assert!(persisted.quick_reconnect);
+}
+
+#[test]
 fn mysql_query_path_streams_rows_when_enabled() {
     if !mysql_tui_integration_enabled() {
         return;
@@ -1380,7 +1535,7 @@ fn connect_message_in_query_editor_does_not_run_query() {
     assert!(!app.query_running);
     assert_eq!(
         app.status_line,
-        "Connect is only available in connection wizard"
+        "Connect is available in wizard or profiles manager"
     );
 }
 

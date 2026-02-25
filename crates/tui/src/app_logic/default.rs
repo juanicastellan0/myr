@@ -83,6 +83,8 @@ impl Default for TuiApp {
             manager_lane: ManagerLane::Profiles,
             manager_profile_cursor: 0,
             manager_bookmark_cursor: 0,
+            manager_rename_mode: false,
+            manager_rename_buffer: String::new(),
             query_editor_text: "SELECT * FROM `users`".to_string(),
             query_cursor: "SELECT * FROM `users`".len(),
             query_history: Vec::new(),
@@ -138,7 +140,9 @@ fn startup_wizard_form() -> ConnectionWizardForm {
     };
 
     let profile = store
-        .profile(default_form.profile_name.as_str())
+        .default_profile()
+        .or_else(|| store.profile(default_form.profile_name.as_str()))
+        .or_else(|| store.quick_reconnect_profile())
         .or_else(|| store.profiles().first());
 
     profile.map_or(default_form, wizard_form_from_profile)

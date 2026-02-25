@@ -412,6 +412,8 @@ struct TuiApp {
     manager_lane: ManagerLane,
     manager_profile_cursor: usize,
     manager_bookmark_cursor: usize,
+    manager_rename_mode: bool,
+    manager_rename_buffer: String,
     query_editor_text: String,
     query_cursor: usize,
     query_history: Vec<String>,

@@ -42,7 +42,8 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 - Guided query actions: server-side filter/sort builder, EXPLAIN preflight, and SQL snippets
 - Foreign-key relationship navigation action to jump across related tables
 - Saved bookmarks for schema targets + query text (persisted in `bookmarks.toml`)
-- Profiles/bookmarks manager screen with list/open/delete workflows
+- Profiles/bookmarks manager screen with list/open/delete/rename workflows
+- Default profile + quick reconnect markers managed directly in the manager (`d` / `q`)
 - Table preview pagination:
   - Keyset pagination for detected `id` / `*_id` keys
   - OFFSET fallback when keyset is unavailable

@@ -7,7 +7,8 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
 
     let mut lines = vec![
         Line::from("Profiles & Bookmarks"),
-        Line::from("Left/Right: lane focus | Up/Down: selection | Enter: open | Del: delete"),
+        Line::from("Left/Right: lane focus | Up/Down: selection | Enter: open/save | Del: delete"),
+        Line::from("Shortcuts: r rename | d default profile | q quick reconnect | F5 connect"),
         Line::from(format!(
             "Focus lane: {} | Profiles: {} | Bookmarks: {}",
             app.manager_lane.label(),
@@ -64,6 +65,16 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
             .add_modifier(Modifier::BOLD),
     )));
     append_selected_details(&mut lines, app, &profiles, &bookmarks);
+    if app.manager_rename_mode {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Rename input: `{}` (Enter save, Esc cancel)",
+                app.manager_rename_buffer
+            ),
+            Style::default().fg(Color::Magenta),
+        )));
+    }
 
     lines
 }
@@ -149,6 +160,11 @@ fn append_selected_details(
                 if profile.read_only { "RO" } else { "RW" },
                 profile.tls_mode
             )));
+            lines.push(Line::from(format!(
+                "  Default: {} | Quick reconnect: {}",
+                if profile.is_default { "yes" } else { "no" },
+                if profile.quick_reconnect { "yes" } else { "no" }
+            )));
         }
         ManagerLane::Bookmarks => {
             let Some(bookmark) = bookmarks.get(
@@ -186,9 +202,22 @@ fn append_selected_details(
 }
 
 fn render_profile_summary(profile: &ConnectionProfile) -> String {
+    let mut markers = Vec::new();
+    if profile.is_default {
+        markers.push("default");
+    }
+    if profile.quick_reconnect {
+        markers.push("quick");
+    }
+    let marker_text = if markers.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", markers.join(","))
+    };
     format!(
-        "{} | {}@{}:{} | db {} | {}",
+        "{}{} | {}@{}:{} | db {} | {}",
         profile.name,
+        marker_text,
         profile.user,
         profile.host,
         profile.port,
