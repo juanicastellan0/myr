@@ -85,7 +85,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
   - Event loop and message flow.
   - Worker lifecycle (connect/query threads + cancellation).
   - Action engine invocation path.
-- [ ] Add "Action Engine Extension Guide" (new action checklist + test strategy).
+- [x] Add "Action Engine Extension Guide" (new action checklist + test strategy).
 
 ## M12: Quality and Compatibility Expansion
 

@@ -108,6 +108,7 @@ Completion path:
 ## Action Engine Invocation Path
 
 The action engine is a pure domain service in `crates/core/src/actions_engine`.
+For extension workflow and required tests, see `docs/action-engine-extension.md`.
 
 ### Discovery And Ranking
 
