@@ -76,7 +76,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 
 - [ ] Split remaining large files by bounded context:
   - [ ] TUI `runtime`, `navigation`, `query_actions`
-  - [ ] core `schema_cache`
+  - [x] core `schema_cache` (split cache service, relationships, and schema types)
   - [x] app `benchmark` (split into parser/runner/report modules)
 - [ ] Move TUI state/data model types out of `crates/tui/src/lib.rs` into dedicated modules.
 - [ ] Add architecture documentation:
@@ -106,5 +106,5 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 ## Next Up (Proposed Execution Order)
 
 - [ ] Add architecture notes in `docs/architecture.md`.
-- [ ] Split core `schema_cache` by responsibility (cache lifecycle vs metadata mapping vs SQL fetch path).
 - [ ] Split TUI `runtime` into state transitions, worker plumbing, and status/event handling modules.
+- [ ] Split TUI `query_actions` into command routing, async worker orchestration, and SQL helper actions.
