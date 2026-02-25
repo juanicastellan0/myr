@@ -38,7 +38,7 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 - SQL audit trail (`audit.ndjson`) with timestamp/profile/database/outcome metadata
 - Error panel with reconnect/retry guidance and auto-reconnect path for transient disconnects
 - Results search mode with buffered match navigation
-- Query editor upgrades: multiline editing, cursor movement, and query history recall
+- Query editor upgrades: multiline editing, explicit cursor ruler + SQL region emphasis, long-query viewporting, and query history recall
 - Guided query actions: server-side filter/sort builder, EXPLAIN preflight, and SQL snippets
 - Foreign-key relationship navigation action to jump across related tables
 - Saved bookmarks for schema targets + query text (persisted in `bookmarks.toml`)

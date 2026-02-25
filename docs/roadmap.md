@@ -53,7 +53,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 - [x] Schema explorer v2:
   - [x] Filter-as-you-type for database/table/column lists.
   - [x] Optional compact/full metadata view for columns.
-- [ ] Query editor v2:
+- [x] Query editor v2:
   - Explicit cursor row/column ruler and active SQL region emphasis.
   - Improved multiline ergonomics for long statements.
 - [x] Command palette search v2:

@@ -187,7 +187,9 @@ Steps:
 Expected:
 
 - Query editor renders multiple numbered lines.
+- Query editor shows an explicit column ruler and a bounded SQL region (`SQL (active region)` ... `End SQL`).
 - Cursor movement updates line/column info in the editor footer.
+- For long multiline SQL, editor shows a viewport with `... lines above/below` indicators while keeping cursor line visible.
 - History navigation restores previously executed SQL and can return to the draft query.
 
 ### Snippet Insert Actions
