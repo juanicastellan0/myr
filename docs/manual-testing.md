@@ -138,6 +138,34 @@ Expected:
 - Results pane shows rows.
 - Status line reports `Query returned ... rows`.
 
+### Complex Join + JSON Projection
+
+Steps:
+
+1. In Query Editor, run:
+
+```sql
+SELECT
+  e.id,
+  u.email,
+  t.title AS track,
+  p.name AS playlist,
+  e.category,
+  JSON_UNQUOTE(JSON_EXTRACT(e.metadata, '$.source')) AS source
+FROM `myr_bench`.`events` e
+JOIN `myr_bench`.`users` u ON u.id = e.user_id
+LEFT JOIN `myr_bench`.`tracks` t ON t.id = e.track_id
+LEFT JOIN `myr_bench`.`playlists` p ON p.id = e.playlist_id
+ORDER BY e.id DESC
+LIMIT 25;
+```
+
+Expected:
+
+- Query succeeds with mixed `JOIN` + `LEFT JOIN` paths.
+- Results render both scalar columns and JSON-derived values (`source`).
+- Schema Explorer relationship lanes remain responsive after this query.
+
 ### Results Table Horizontal Viewport
 
 Steps:
@@ -252,7 +280,7 @@ Expected:
 
 Steps:
 
-1. Go to Schema Explorer and select a table with known relationships (for seeded data, `users`/`events`).
+1. Go to Schema Explorer and select a table with known relationships (for seeded data, `users`, `sessions`, or `events`).
 2. Confirm the `Relationships` subsection shows related table entries.
 3. Invoke `Jump to related table` from command palette (`Ctrl+P`) or its ranked footer slot.
 4. Invoke the same action again to continue cycling relationships.

@@ -81,6 +81,7 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
   - `docs/manual-testing.md`
 - Quick seed + run path:
   - `scripts/dev-db-seed.sh`
+  - Seeds a richer relational graph (`users/sessions/tracks/playlists/events`) for relationship and join testing
   - `export MYR_DB_PASSWORD=root`
   - `cargo run -p myr-app`
 

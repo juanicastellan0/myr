@@ -75,6 +75,11 @@ bench/scripts/run_benchmark.sh
 scripts/dev-db-seed.sh
 ```
 
+The seeded dataset now includes a relational graph across:
+- `organizations`, `users`, `devices`, `sessions`
+- `artists`, `tracks`, `playlists`, `playlist_tracks`
+- `events` with foreign keys and JSON metadata payload
+
 ## CI Perf Smoke
 
 CI runs a benchmark smoke check in `.github/workflows/ci.yml` against a MySQL service with:
