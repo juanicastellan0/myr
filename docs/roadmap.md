@@ -81,7 +81,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
   - [x] core `schema_cache` (split cache service, relationships, and schema types)
   - [x] app `benchmark` (split into parser/runner/report modules)
 - [x] Move TUI state/data model types out of `crates/tui/src/lib.rs` into dedicated modules.
-- [ ] Add architecture documentation:
+- [x] Add architecture documentation:
   - Event loop and message flow.
   - Worker lifecycle (connect/query threads + cancellation).
   - Action engine invocation path.
