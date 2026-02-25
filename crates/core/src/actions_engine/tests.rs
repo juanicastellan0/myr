@@ -240,6 +240,29 @@ fn relationship_and_bookmark_actions_are_invokable_with_context_flags() {
 }
 
 #[test]
+fn health_diagnostics_action_is_invokable_when_idle() {
+    let mut engine = ActionsEngine::new();
+    let context = ActionContext::default().with_view(AppView::Results);
+
+    let diagnostics = engine
+        .invoke(ActionId::RunHealthDiagnostics, &context)
+        .expect("health diagnostics should be enabled");
+    assert_eq!(diagnostics, ActionInvocation::RunHealthDiagnostics);
+}
+
+#[test]
+fn health_diagnostics_action_is_disabled_while_query_is_running() {
+    let mut engine = ActionsEngine::new();
+    let mut context = ActionContext::default().with_view(AppView::Results);
+    context.query_running = true;
+
+    let error = engine
+        .invoke(ActionId::RunHealthDiagnostics, &context)
+        .expect_err("health diagnostics should be disabled while query is running");
+    assert!(error.to_string().contains("is disabled"));
+}
+
+#[test]
 fn export_variant_actions_resolve_to_expected_formats() {
     let mut engine = ActionsEngine::new();
     let context = ActionContext {

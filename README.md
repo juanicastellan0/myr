@@ -35,8 +35,9 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 - Optional secure password retrieval via OS keyring (`password_source = keyring`) with env fallback
 - Expanded TLS profile options (mode + CA/client cert/client key + verification toggles)
 - Read-only profile mode guard (blocks write/DDL SQL when enabled)
-- SQL audit trail (`audit.ndjson`) with timestamp/profile/database/outcome metadata
+- SQL audit trail (`audit.ndjson`) with timestamp/profile/database/outcome metadata and retention rotation
 - Error panel with reconnect/retry guidance and auto-reconnect path for transient disconnects
+- Health diagnostics action (`health`/`doctor` in palette) for connection + schema + query smoke checks
 - Results search mode with buffered match navigation
 - Query editor upgrades: multiline editing, explicit cursor ruler + SQL region emphasis, long-query viewporting, and query history recall
 - Guided query actions: server-side filter/sort builder, EXPLAIN preflight, and SQL snippets
@@ -64,6 +65,9 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 - TLS options are profile-driven (`tls_mode`, optional CA/client cert/client key, verification toggles).
 - Table preview now supports paging actions: keyset pagination on detected `id`/`*_id` columns with OFFSET fallback.
 - Query executions append audit entries to `~/.config/myr/audit.ndjson` (or `$MYR_CONFIG_DIR/myr/audit.ndjson`).
+- Audit retention defaults:
+  - `MYR_AUDIT_MAX_BYTES` (default `5242880`, 5 MiB before rotate)
+  - `MYR_AUDIT_MAX_ARCHIVES` (default `3` rotated files)
 
 ## Benchmark Quickstart
 

@@ -75,6 +75,7 @@ impl ActionsEngine {
                 ActionInvocation::RunSql(preview_select_sql(&target, PREVIEW_LIMIT))
             }
             ActionId::JumpToRelatedTable => ActionInvocation::JumpToRelatedTable,
+            ActionId::RunHealthDiagnostics => ActionInvocation::RunHealthDiagnostics,
             ActionId::PreviousPage => ActionInvocation::PaginatePrevious,
             ActionId::NextPage => ActionInvocation::PaginateNext,
             ActionId::DescribeTable => {

@@ -15,6 +15,7 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("Profiles manager: F5 connect, r rename, d default, q quick reconnect"),
         Line::from("Query editor: Enter run, Ctrl+Enter newline"),
         Line::from("Query editor: Left/Right cursor, Up/Down history"),
+        Line::from("Palette: use 'health' / 'doctor' to run diagnostics"),
         Line::from("F2: toggle perf overlay"),
         Line::from("F3: toggle safe mode"),
         Line::from("F4: toggle schema column compact/full view"),

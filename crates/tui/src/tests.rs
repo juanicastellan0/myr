@@ -1231,6 +1231,16 @@ fn apply_invocation_handles_non_sql_actions() {
         "unexpected search status: {}",
         app.status_line
     );
+
+    app.data_backend = None;
+    app.apply_invocation(
+        ActionId::RunHealthDiagnostics,
+        ActionInvocation::RunHealthDiagnostics,
+    );
+    assert_eq!(app.status_line, "Health diagnostics failed: not connected");
+    let panel = app.error_panel.as_ref().expect("health diagnostics panel");
+    assert_eq!(panel.kind, ErrorKind::Connection);
+    assert_eq!(panel.title, "Health Diagnostics");
 }
 
 #[test]
@@ -1338,6 +1348,13 @@ fn palette_supports_fuzzy_and_alias_queries() {
     app.palette_query = "fk".to_string();
     let entries = app.palette_entries();
     assert_eq!(entries.first().copied(), Some(ActionId::JumpToRelatedTable));
+
+    app.palette_query = "doctor".to_string();
+    let entries = app.palette_entries();
+    assert_eq!(
+        entries.first().copied(),
+        Some(ActionId::RunHealthDiagnostics)
+    );
 }
 
 #[test]

@@ -1549,6 +1549,7 @@ fn palette_aliases(action_id: ActionId) -> &'static [&'static str] {
         ActionId::ShowIndexes => &["index", "indexes", "keys"],
         ActionId::ShowCreateTable => &["ddl", "create", "show create"],
         ActionId::CountEstimate => &["count", "estimate", "rows"],
+        ActionId::RunHealthDiagnostics => &["health", "diagnostics", "doctor", "smoke"],
         ActionId::RunCurrentQuery => &["run", "execute", "query"],
         ActionId::ApplyLimit200 => &["limit", "cap rows", "preview limit"],
         ActionId::ExplainQuery => &["explain", "plan", "query plan"],

@@ -141,6 +141,70 @@ impl TuiApp {
         }
     }
 
+    fn run_health_diagnostics(&mut self) {
+        let Some(data_backend) = self.data_backend.clone() else {
+            self.status_line = "Health diagnostics failed: not connected".to_string();
+            self.open_error_panel(
+                ErrorKind::Connection,
+                "Health Diagnostics",
+                "Connection check failed".to_string(),
+                "Connection check: FAILED (no active database connection)\nSchema check: skipped\nQuery smoke: skipped".to_string(),
+            );
+            return;
+        };
+
+        let schema_ready = self.schema_cache.is_some() && !self.schema_databases.is_empty();
+        let schema_message = if schema_ready {
+            format!(
+                "Schema check: OK ({} databases loaded)",
+                self.schema_databases.len()
+            )
+        } else {
+            "Schema check: FAILED (schema cache/databases not loaded)".to_string()
+        };
+
+        match run_query_worker(
+            data_backend,
+            "SELECT 1 AS health_check".to_string(),
+            CancellationToken::new(),
+        ) {
+            QueryWorkerOutcome::Success {
+                rows_streamed,
+                elapsed,
+                ..
+            } if schema_ready => {
+                self.error_panel = None;
+                self.status_line = format!(
+                    "Health diagnostics passed: connection OK, schema OK, query smoke {rows_streamed} row(s) in {elapsed:.1?}"
+                );
+            }
+            QueryWorkerOutcome::Success {
+                rows_streamed,
+                elapsed,
+                ..
+            } => {
+                self.status_line = "Health diagnostics failed: schema check failed".to_string();
+                self.open_error_panel(
+                    ErrorKind::Connection,
+                    "Health Diagnostics",
+                    "Schema check failed".to_string(),
+                    format!(
+                        "Connection check: OK\n{schema_message}\nQuery smoke: OK ({rows_streamed} row(s) in {elapsed:.1?})"
+                    ),
+                );
+            }
+            QueryWorkerOutcome::Failure(error) => {
+                self.status_line = format!("Health diagnostics failed: {error}");
+                self.open_error_panel(
+                    ErrorKind::Query,
+                    "Health Diagnostics",
+                    "Query smoke failed".to_string(),
+                    format!("Connection check: OK\n{schema_message}\nQuery smoke: FAILED ({error})"),
+                );
+            }
+        }
+    }
+
     pub(super) fn start_preview_paged_query(&mut self, fallback_sql: String) {
         let Some(state) = self.build_preview_pagination_state() else {
             self.clear_pagination_state();
@@ -352,6 +416,9 @@ impl TuiApp {
             }
             ActionInvocation::PaginateNext => {
                 self.run_pagination_transition(PageTransition::Next);
+            }
+            ActionInvocation::RunHealthDiagnostics => {
+                self.run_health_diagnostics();
             }
             ActionInvocation::ReplaceQueryEditorText(query) => {
                 self.query_editor_text = query;

@@ -17,6 +17,8 @@ Thanks for contributing.
 - Run coverage locally when your change affects core behavior:
   - `cargo llvm-cov --workspace --all-features --summary-only`
 - Update docs when behavior or architecture changes.
+- If you add or modify runtime env configuration (for example audit retention vars),
+  update `README.md`, `docs/manual-testing.md`, and `docs/quality.md` in the same change.
 
 ## CI quality gates
 

@@ -387,6 +387,19 @@ or if using custom config root:
 tail -n 20 "$MYR_CONFIG_DIR/myr/audit.ndjson"
 ```
 
+3. Trigger aggressive rotation and run a few more queries:
+
+```bash
+export MYR_AUDIT_MAX_BYTES=512
+export MYR_AUDIT_MAX_ARCHIVES=2
+```
+
+4. Restart `myr-app`, run several queries, then inspect rotated files:
+
+```bash
+ls -1 ~/.config/myr/audit.ndjson*
+```
+
 Expected:
 
 - Each query lifecycle emits JSON-line records with:
@@ -395,8 +408,22 @@ Expected:
   - `database`
   - `outcome` (`started`, `succeeded`, `failed`, `cancelled`, `blocked`)
 - Success records include row/elapsed metadata; failed/blocked records include `error`.
+- When size threshold is exceeded, audit file rotates to `audit.ndjson.1`, then `audit.ndjson.2`, keeping at most configured archive count.
 
 ## Resilience and Recovery
+
+### Health Diagnostics Action
+
+Steps:
+
+1. Open command palette (`Ctrl+P`), search `health`, and run `Run health diagnostics`.
+2. Confirm behavior while connected.
+3. Disconnect DB (or use invalid connection), rerun diagnostics, and inspect error panel.
+
+Expected:
+
+- Connected run reports: connection check OK, schema check OK, query smoke OK.
+- Failure run opens `Health Diagnostics` panel with failing check details.
 
 ### Auto-Reconnect State Flow
 

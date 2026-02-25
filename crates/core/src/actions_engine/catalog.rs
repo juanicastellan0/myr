@@ -4,6 +4,7 @@ use super::enablement::action_enabled;
 pub enum ActionId {
     PreviewTable,
     JumpToRelatedTable,
+    RunHealthDiagnostics,
     PreviousPage,
     NextPage,
     DescribeTable,
@@ -99,7 +100,7 @@ pub struct ActionDefinition {
     pub description: &'static str,
 }
 
-const ACTIONS: [ActionDefinition; 27] = [
+const ACTIONS: [ActionDefinition; 28] = [
     ActionDefinition {
         id: ActionId::PreviewTable,
         title: "Preview table",
@@ -109,6 +110,11 @@ const ACTIONS: [ActionDefinition; 27] = [
         id: ActionId::JumpToRelatedTable,
         title: "Jump to related table",
         description: "Follow a foreign-key relationship to another table",
+    },
+    ActionDefinition {
+        id: ActionId::RunHealthDiagnostics,
+        title: "Run health diagnostics",
+        description: "Run connection, schema, and query smoke checks",
     },
     ActionDefinition {
         id: ActionId::PreviousPage,

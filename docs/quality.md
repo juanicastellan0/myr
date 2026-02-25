@@ -63,3 +63,7 @@ MYR_DB_PASSWORD=root MYR_RUN_TUI_MYSQL_INTEGRATION=1 \
   MYR_TEST_DB_USER=root MYR_TEST_DB_DATABASE=myr_bench \
   cargo test -p myr-tui mysql_query_path_streams_rows_when_enabled -- --nocapture
 ```
+
+Runtime behavior knobs (optional):
+- `MYR_AUDIT_MAX_BYTES`: rotate `audit.ndjson` when file exceeds this size (default `5242880`).
+- `MYR_AUDIT_MAX_ARCHIVES`: number of rotated audit files to keep (default `3`).

@@ -55,6 +55,16 @@ struct QueryMetrics {
     elapsed: Duration,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BenchMetricsSnapshot {
+    connect_ms: f64,
+    first_row_ms: f64,
+    elapsed_ms: f64,
+    rows_streamed: u64,
+    rows_per_sec: f64,
+    peak_memory_bytes: Option<u64>,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_args()?;
@@ -94,22 +104,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("metric.rows_streamed={}", metrics.rows_streamed);
     println!("metric.stream_elapsed_ms={elapsed_ms:.3}");
     println!("metric.rows_per_sec={rows_per_sec:.3}");
-    if let Some(bytes) = peak_memory_bytes_best_effort() {
+    let peak_memory_bytes = peak_memory_bytes_best_effort();
+    if let Some(bytes) = peak_memory_bytes {
         println!("metric.peak_memory_bytes={bytes}");
     } else {
         println!("metric.peak_memory_bytes=n/a");
     }
+
+    let snapshot = BenchMetricsSnapshot {
+        connect_ms: connect_latency.as_secs_f64() * 1_000.0,
+        first_row_ms,
+        elapsed_ms,
+        rows_streamed: metrics.rows_streamed,
+        rows_per_sec,
+        peak_memory_bytes,
+    };
+
     if let Some(path) = config.metrics_output.as_deref() {
-        write_metrics_file(
-            path,
-            &config,
-            connect_latency.as_secs_f64() * 1_000.0,
-            first_row_ms,
-            elapsed_ms,
-            metrics.rows_streamed,
-            rows_per_sec,
-            peak_memory_bytes_best_effort(),
-        )?;
+        write_metrics_file(path, &config, snapshot)?;
         println!("metric.output_file={path}");
     }
 
@@ -246,12 +258,7 @@ fn enforce_assertions(
 fn write_metrics_file(
     path: &str,
     config: &BenchmarkConfig,
-    connect_ms: f64,
-    first_row_ms: f64,
-    elapsed_ms: f64,
-    rows_streamed: u64,
-    rows_per_sec: f64,
-    peak_memory_bytes: Option<u64>,
+    snapshot: BenchMetricsSnapshot,
 ) -> io::Result<()> {
     let path_ref = Path::new(path);
     if let Some(parent) = path_ref.parent() {
@@ -276,12 +283,12 @@ fn write_metrics_file(
         "sql": config.sql,
         "seed_rows": config.seed_rows,
         "metrics": {
-            "connect_ms": connect_ms,
-            "first_row_ms": first_row_ms,
-            "stream_elapsed_ms": elapsed_ms,
-            "rows_streamed": rows_streamed,
-            "rows_per_sec": rows_per_sec,
-            "peak_memory_bytes": peak_memory_bytes,
+            "connect_ms": snapshot.connect_ms,
+            "first_row_ms": snapshot.first_row_ms,
+            "stream_elapsed_ms": snapshot.elapsed_ms,
+            "rows_streamed": snapshot.rows_streamed,
+            "rows_per_sec": snapshot.rows_per_sec,
+            "peak_memory_bytes": snapshot.peak_memory_bytes,
         }
     });
 
@@ -395,7 +402,7 @@ mod tests {
     use super::{
         build_insert_batch_sql, enforce_assertions, ensure_seed_data, execute_sql, io_other,
         next_value, parse_args_from, query_scalar_u64, run_query_benchmark, write_metrics_file,
-        BenchmarkConfig, ParseOutcome,
+        BenchMetricsSnapshot, BenchmarkConfig, ParseOutcome,
     };
 
     fn mysql_integration_enabled() -> bool {
@@ -532,18 +539,17 @@ mod tests {
             metrics_label: Some("ci-smoke".to_string()),
             ..BenchmarkConfig::default()
         };
+        let snapshot = BenchMetricsSnapshot {
+            connect_ms: 10.0,
+            first_row_ms: 20.0,
+            elapsed_ms: 30.0,
+            rows_streamed: 42,
+            rows_per_sec: 2_000.0,
+            peak_memory_bytes: Some(123_456),
+        };
 
-        write_metrics_file(
-            output_path.to_string_lossy().as_ref(),
-            &config,
-            10.0,
-            20.0,
-            30.0,
-            42,
-            2_000.0,
-            Some(123_456),
-        )
-        .expect("write metrics");
+        write_metrics_file(output_path.to_string_lossy().as_ref(), &config, snapshot)
+            .expect("write metrics");
 
         let raw = std::fs::read_to_string(output_path).expect("read metrics file");
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse metrics json");

@@ -30,6 +30,7 @@ pub enum CopyTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionInvocation {
     RunSql(String),
+    RunHealthDiagnostics,
     PaginatePrevious,
     PaginateNext,
     ReplaceQueryEditorText(String),

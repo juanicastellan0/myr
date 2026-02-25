@@ -24,6 +24,7 @@ pub(super) fn action_enabled(action_id: ActionId, context: &ActionContext) -> bo
                 && context.selection.database.is_some()
                 && !context.query_running
         }
+        ActionId::RunHealthDiagnostics => !context.query_running,
         ActionId::RunCurrentQuery => {
             !context.query_running
                 && context

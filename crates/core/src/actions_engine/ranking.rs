@@ -122,6 +122,13 @@ pub(super) fn action_base_score(action_id: ActionId, context: &ActionContext) ->
                 0
             }
         }
+        ActionId::RunHealthDiagnostics => {
+            if !context.query_running {
+                565
+            } else {
+                0
+            }
+        }
         ActionId::RunCurrentQuery => {
             if context
                 .query_text
