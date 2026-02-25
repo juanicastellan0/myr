@@ -509,6 +509,13 @@ MYR_TEST_DB_DATABASE=myr_bench \
 cargo test -p myr-tui mysql_query_path_streams_rows_when_enabled -- --nocapture
 ```
 
+Keyring smoke check (optional; Linux/macOS/Windows):
+
+```bash
+MYR_RUN_KEYRING_SMOKE=1 \
+cargo test -p myr-adapters keyring_password_round_trip_when_enabled -- --nocapture
+```
+
 Perf metrics output (for trend artifacts / local tracking):
 
 ```bash

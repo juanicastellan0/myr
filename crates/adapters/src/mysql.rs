@@ -396,6 +396,9 @@ fn to_query_error(error: mysql_async::Error) -> QueryBackendError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use myr_core::profiles::{ConnectionProfile, TlsMode};
     use mysql_async::Value;
 
@@ -461,5 +464,48 @@ mod tests {
 
         profile.tls_client_key_path = Some("/tmp/client-key.pem".to_string());
         assert!(client_identity_from_profile(&profile).is_some());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    fn keyring_smoke_enabled() -> bool {
+        matches!(
+            std::env::var("MYR_RUN_KEYRING_SMOKE").ok().as_deref(),
+            Some("1")
+        )
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    fn keyring_smoke_profile() -> ConnectionProfile {
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let mut profile = ConnectionProfile::new("keyring-smoke", "127.0.0.1", "root");
+        profile.keyring_service = Some("myr-ci-keyring-smoke".to_string());
+        profile.keyring_account = Some(format!("myr-ci-keyring-smoke-{unique_suffix}"));
+        profile
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    fn keyring_password_round_trip_when_enabled() {
+        if !keyring_smoke_enabled() {
+            return;
+        }
+
+        let profile = keyring_smoke_profile();
+        let expected_password = format!(
+            "myr-smoke-password-{}",
+            profile.keyring_account.as_deref().unwrap_or("default")
+        );
+        let entry = super::keyring_entry(&profile).expect("keyring entry should be created");
+        let _ = entry.delete_credential();
+
+        super::store_keyring_password(&profile, &expected_password);
+        let loaded = super::load_keyring_password(&profile);
+        assert_eq!(loaded.as_deref(), Some(expected_password.as_str()));
+
+        entry
+            .delete_credential()
+            .expect("keyring credential cleanup should succeed");
     }
 }

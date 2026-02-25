@@ -103,6 +103,7 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
   - MySQL-backed integration tests enabled via `MYR_RUN_MYSQL_INTEGRATION=1`
   - MariaDB compatibility lane runs `myr-adapters` integration test suite on `mariadb:11.4`
   - TUI MySQL integration gate enabled via `MYR_RUN_TUI_MYSQL_INTEGRATION=1`
+  - optional cross-platform keyring smoke checks are enabled when repository variable `MYR_CI_RUN_KEYRING_SMOKE=1`
   - see `.github/workflows/ci.yml`
 - CI cross-platform validation:
   - test + build on `ubuntu-latest`, `macos-latest`, and `windows-latest`

@@ -46,6 +46,9 @@ Current gate settings:
   - `cargo test --workspace --all-features --locked`
   - `cargo build --workspace --all-features --locked`
   - runs on `ubuntu-latest`, `macos-latest`, and `windows-latest`
+- optional cross-platform keyring smoke check:
+  - enabled when repository variable `MYR_CI_RUN_KEYRING_SMOKE=1`
+  - command: `MYR_RUN_KEYRING_SMOKE=1 cargo test -p myr-adapters keyring_password_round_trip_when_enabled -- --nocapture`
 - command:
 
 ```bash
@@ -72,6 +75,9 @@ MYR_DB_PASSWORD=root MYR_RUN_TUI_MYSQL_INTEGRATION=1 \
   MYR_TEST_DB_HOST=127.0.0.1 MYR_TEST_DB_PORT=33306 \
   MYR_TEST_DB_USER=root MYR_TEST_DB_DATABASE=myr_bench \
   cargo test -p myr-tui mysql_query_path_streams_rows_when_enabled -- --nocapture
+
+MYR_RUN_KEYRING_SMOKE=1 \
+  cargo test -p myr-adapters keyring_password_round_trip_when_enabled -- --nocapture
 ```
 
 Runtime behavior knobs (optional):
