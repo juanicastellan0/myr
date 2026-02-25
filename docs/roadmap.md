@@ -75,7 +75,9 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 ## M11: Architecture and Dev Velocity
 
 - [ ] Split remaining large files by bounded context:
-  - [ ] TUI `runtime`, `navigation`, `query_actions`
+  - [x] TUI `runtime` (split into handle/connect/query runtime modules)
+  - [ ] TUI `navigation`
+  - [ ] TUI `query_actions`
   - [x] core `schema_cache` (split cache service, relationships, and schema types)
   - [x] app `benchmark` (split into parser/runner/report modules)
 - [ ] Move TUI state/data model types out of `crates/tui/src/lib.rs` into dedicated modules.
@@ -106,5 +108,5 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 ## Next Up (Proposed Execution Order)
 
 - [ ] Add architecture notes in `docs/architecture.md`.
-- [ ] Split TUI `runtime` into state transitions, worker plumbing, and status/event handling modules.
+- [ ] Split TUI `navigation` into pane-level movement, schema traversal, and manager interactions.
 - [ ] Split TUI `query_actions` into command routing, async worker orchestration, and SQL helper actions.
