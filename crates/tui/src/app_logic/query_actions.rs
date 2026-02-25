@@ -418,6 +418,7 @@ impl TuiApp {
             Pane::SchemaExplorer => AppView::SchemaExplorer,
             Pane::Results => AppView::Results,
             Pane::QueryEditor => AppView::QueryEditor,
+            Pane::ProfileBookmarks => AppView::ConnectionWizard,
         };
 
         let query_text = if matches!(self.pane, Pane::QueryEditor) || self.query_running {
@@ -507,6 +508,7 @@ impl TuiApp {
             Pane::SchemaExplorer => 1,
             Pane::Results => 2,
             Pane::QueryEditor => 3,
+            Pane::ProfileBookmarks => 4,
         }
     }
 
@@ -538,6 +540,7 @@ impl TuiApp {
             Pane::SchemaExplorer => "Schema Explorer",
             Pane::Results => "Results",
             Pane::QueryEditor => "Query Editor",
+            Pane::ProfileBookmarks => "Profiles & Bookmarks",
         }
     }
 

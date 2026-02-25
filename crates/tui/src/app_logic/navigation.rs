@@ -36,6 +36,7 @@ impl TuiApp {
                 DirectionKey::Up => self.use_previous_query_from_history(),
                 DirectionKey::Down => self.use_next_query_from_history(),
             },
+            Pane::ProfileBookmarks => self.navigate_profile_bookmark_manager(direction),
         }
     }
 
@@ -663,6 +664,219 @@ impl TuiApp {
             .get(index)
             .cloned()
             .unwrap_or_else(|| format!("col{}", index + 1))
+    }
+
+    pub(super) fn open_profile_bookmark_manager(&mut self) {
+        self.clamp_manager_cursors();
+        self.set_active_pane(Pane::ProfileBookmarks);
+        self.status_line = format!(
+            "Manager opened: {} profiles | {} bookmarks",
+            self.manager_profiles().len(),
+            self.manager_bookmarks().len()
+        );
+    }
+
+    fn navigate_profile_bookmark_manager(&mut self, direction: DirectionKey) {
+        match direction {
+            DirectionKey::Left => {
+                self.manager_lane = self.manager_lane.previous();
+                self.status_line = format!("Manager focus: {}", self.manager_lane.label());
+            }
+            DirectionKey::Right => {
+                self.manager_lane = self.manager_lane.next();
+                self.status_line = format!("Manager focus: {}", self.manager_lane.label());
+            }
+            DirectionKey::Up => self.move_manager_cursor(-1),
+            DirectionKey::Down => self.move_manager_cursor(1),
+        }
+    }
+
+    fn move_manager_cursor(&mut self, delta: isize) {
+        self.clamp_manager_cursors();
+        let lane_label = self.manager_lane.label();
+        let len = self.current_manager_len();
+        if len == 0 {
+            self.status_line = format!("No {} available", lane_label.to_lowercase());
+            return;
+        }
+
+        let cursor = self.current_manager_cursor_mut();
+        if delta < 0 {
+            *cursor = cursor.saturating_sub(delta.unsigned_abs());
+        } else {
+            *cursor = (*cursor + delta as usize).min(len.saturating_sub(1));
+        }
+        self.status_line = format!(
+            "{} {} / {}",
+            lane_label,
+            cursor.saturating_add(1),
+            len
+        );
+    }
+
+    pub(super) fn open_manager_selection(&mut self) {
+        self.clamp_manager_cursors();
+        match self.manager_lane {
+            ManagerLane::Profiles => self.open_selected_manager_profile(),
+            ManagerLane::Bookmarks => self.open_selected_manager_bookmark(),
+        }
+    }
+
+    fn open_selected_manager_profile(&mut self) {
+        let profiles = self.manager_profiles();
+        if profiles.is_empty() {
+            self.status_line = "No profiles available".to_string();
+            return;
+        }
+
+        let index = self.manager_profile_cursor.min(profiles.len().saturating_sub(1));
+        let profile = profiles[index].clone();
+        self.wizard_form = wizard_form_from_profile(&profile);
+        self.last_connect_profile = Some(profile.clone());
+        self.set_active_pane(Pane::ConnectionWizard);
+        self.status_line = format!("Loaded profile `{}` into wizard", profile.name);
+    }
+
+    fn open_selected_manager_bookmark(&mut self) {
+        let bookmarks = self.manager_bookmarks();
+        if bookmarks.is_empty() {
+            self.status_line = "No bookmarks available".to_string();
+            return;
+        }
+
+        let index = self
+            .manager_bookmark_cursor
+            .min(bookmarks.len().saturating_sub(1));
+        self.apply_bookmark(bookmarks[index].clone());
+    }
+
+    pub(super) fn delete_manager_selection(&mut self) {
+        if self.pane != Pane::ProfileBookmarks {
+            self.status_line = "Delete selection is only available in manager view".to_string();
+            return;
+        }
+
+        match self.manager_lane {
+            ManagerLane::Profiles => self.delete_selected_profile(),
+            ManagerLane::Bookmarks => self.delete_selected_bookmark(),
+        }
+    }
+
+    fn delete_selected_profile(&mut self) {
+        let Some(store) = self.profile_store.as_mut() else {
+            self.status_line = "Profile storage unavailable on this platform".to_string();
+            return;
+        };
+        if store.profiles().is_empty() {
+            self.status_line = "No profiles available".to_string();
+            return;
+        }
+
+        let index = self
+            .manager_profile_cursor
+            .min(store.profiles().len().saturating_sub(1));
+        let name = store.profiles()[index].name.clone();
+        if !store.delete_profile(name.as_str()) {
+            self.status_line = format!("Profile `{name}` could not be deleted");
+            return;
+        }
+
+        match store.persist() {
+            Ok(()) => {
+                if self.manager_profile_cursor > 0
+                    && self.manager_profile_cursor >= store.profiles().len()
+                {
+                    self.manager_profile_cursor = self.manager_profile_cursor.saturating_sub(1);
+                }
+                self.status_line = format!(
+                    "Deleted profile `{name}` ({} remaining)",
+                    store.profiles().len()
+                );
+            }
+            Err(error) => {
+                self.status_line = format!("Profile delete failed: {error}");
+            }
+        }
+    }
+
+    fn delete_selected_bookmark(&mut self) {
+        let Some(store) = self.bookmark_store.as_mut() else {
+            self.status_line = "Bookmark storage unavailable on this platform".to_string();
+            return;
+        };
+        if store.bookmarks().is_empty() {
+            self.status_line = "No bookmarks available".to_string();
+            return;
+        }
+
+        let index = self
+            .manager_bookmark_cursor
+            .min(store.bookmarks().len().saturating_sub(1));
+        let name = store.bookmarks()[index].name.clone();
+        if !store.delete_bookmark(name.as_str()) {
+            self.status_line = format!("Bookmark `{name}` could not be deleted");
+            return;
+        }
+
+        match store.persist() {
+            Ok(()) => {
+                self.bookmark_cycle_index = 0;
+                if self.manager_bookmark_cursor > 0
+                    && self.manager_bookmark_cursor >= store.bookmarks().len()
+                {
+                    self.manager_bookmark_cursor = self.manager_bookmark_cursor.saturating_sub(1);
+                }
+                self.status_line = format!(
+                    "Deleted bookmark `{name}` ({} remaining)",
+                    store.bookmarks().len()
+                );
+            }
+            Err(error) => {
+                self.status_line = format!("Bookmark delete failed: {error}");
+            }
+        }
+    }
+
+    fn current_manager_len(&self) -> usize {
+        match self.manager_lane {
+            ManagerLane::Profiles => self.manager_profiles().len(),
+            ManagerLane::Bookmarks => self.manager_bookmarks().len(),
+        }
+    }
+
+    fn current_manager_cursor_mut(&mut self) -> &mut usize {
+        match self.manager_lane {
+            ManagerLane::Profiles => &mut self.manager_profile_cursor,
+            ManagerLane::Bookmarks => &mut self.manager_bookmark_cursor,
+        }
+    }
+
+    pub(super) fn manager_profiles(&self) -> Vec<ConnectionProfile> {
+        self.profile_store
+            .as_ref()
+            .map_or_else(Vec::new, |store| store.profiles().to_vec())
+    }
+
+    pub(super) fn manager_bookmarks(&self) -> Vec<SavedBookmark> {
+        self.bookmark_store
+            .as_ref()
+            .map_or_else(Vec::new, |store| store.bookmarks().to_vec())
+    }
+
+    fn clamp_manager_cursors(&mut self) {
+        let profile_count = self.manager_profiles().len();
+        if profile_count == 0 {
+            self.manager_profile_cursor = 0;
+        } else {
+            self.manager_profile_cursor = self.manager_profile_cursor.min(profile_count - 1);
+        }
+
+        let bookmark_count = self.manager_bookmarks().len();
+        if bookmark_count == 0 {
+            self.manager_bookmark_cursor = 0;
+        } else {
+            self.manager_bookmark_cursor = self.manager_bookmark_cursor.min(bookmark_count - 1);
+        }
     }
 
     pub(super) fn export_results(&mut self, format: myr_core::actions_engine::ExportFormat) {

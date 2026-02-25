@@ -279,6 +279,23 @@ Expected:
 - Open restores database/table/column selection and query text.
 - Bookmarks persist to `~/.config/myr/bookmarks.toml` (or `$MYR_CONFIG_DIR/myr/bookmarks.toml`).
 
+## Profiles and Bookmarks Manager
+
+Steps:
+
+1. Press `F7` to open the `Profiles & Bookmarks` pane.
+2. In `Profiles` lane, use `Up`/`Down` and press `Enter` on a profile.
+3. Confirm app returns to Connection Wizard with profile fields loaded.
+4. Press `F7` again, move to `Bookmarks` lane (`Right`), select a bookmark, and press `Enter`.
+5. Press `F7` and use `Del` on a selected bookmark entry.
+
+Expected:
+
+- Manager pane shows both profile and bookmark lists with focused lane indicator.
+- Opening a profile loads it into Connection Wizard for quick reconnect (`F5`).
+- Opening a bookmark restores its selection/query target.
+- `Del` removes selected entry and persists updated store file.
+
 ## Results Search Mode
 
 Steps:

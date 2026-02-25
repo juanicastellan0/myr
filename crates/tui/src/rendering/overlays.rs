@@ -8,6 +8,7 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("Global keymap"),
         Line::from("F10: quit immediately"),
         Line::from("F6: go to connection wizard"),
+        Line::from("F7: open profiles/bookmarks manager"),
         Line::from("?: toggle help"),
         Line::from("Tab: cycle panes"),
         Line::from("Connection wizard: E/Enter edit, F5 connect"),
@@ -21,6 +22,7 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("Ctrl+U: clear current input"),
         Line::from("Ctrl+C: cancel query (or request exit if idle)"),
         Line::from("Arrows (or Alt+h/j/k/l): navigation"),
+        Line::from("Del: delete selected manager entry"),
         Line::from("1..7: invoke ranked action slot"),
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"));

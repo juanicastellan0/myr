@@ -60,8 +60,9 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
   - Fuzzy match with ranking by score + recency + context.
   - Action aliases/keywords (`ddl`, `export`, `bookmark`, etc.).
 - [ ] Profile/bookmark manager screen:
-  - List/select/rename/delete.
-  - Mark default profile and quick reconnect target.
+  - [x] List/select/delete.
+  - [ ] Rename entries.
+  - [ ] Mark default profile and quick reconnect target.
 
 ## M10: Reliability and Safety Hardening (Post-M8)
 
@@ -105,6 +106,6 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 ## Next Up (Proposed Execution Order)
 
 - [ ] Remove adapter panic path + add regression test.
-- [ ] Add profile/bookmark manager screen (list/select/rename/delete).
+- [ ] Add profile/bookmark manager rename/default profile support.
 - [ ] Add architecture notes in `docs/architecture.md`.
 - [ ] Split `app/src/bin/benchmark.rs` into parser/runner/report modules.

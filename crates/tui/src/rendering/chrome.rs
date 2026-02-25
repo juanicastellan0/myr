@@ -109,12 +109,12 @@ pub(super) fn render_tabs_bar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let tab_focus_marker = pulse_char(app.loading_tick);
     let tabs_title = if app.pane_flash_ticks > 0 {
         format!(
-            "Panes (Tab cycles, F6 returns to Connection Wizard) | Active: {} {}",
+            "Panes (Tab cycles, F6 wizard, F7 manager) | Active: {} {}",
             app.pane_name(),
             tab_focus_marker
         )
     } else {
-        "Panes (Tab cycles, F6 returns to Connection Wizard)".to_string()
+        "Panes (Tab cycles, F6 wizard, F7 manager)".to_string()
     };
 
     let tab_labels = [
@@ -122,6 +122,7 @@ pub(super) fn render_tabs_bar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         (Pane::SchemaExplorer, "Schema Explorer"),
         (Pane::Results, "Results"),
         (Pane::QueryEditor, "Query Editor"),
+        (Pane::ProfileBookmarks, "Profiles & Bookmarks"),
     ]
     .into_iter()
     .map(|(pane, label)| {
@@ -162,6 +163,8 @@ pub(super) fn render_tabs_bar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 pub(super) fn footer_line(app: &TuiApp) -> String {
     if app.pane == Pane::ConnectionWizard {
         "F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit".to_string()
+    } else if app.pane == Pane::ProfileBookmarks {
+        "Enter: open selection | Del: delete selection | F6: wizard | F7: manager".to_string()
     } else {
         let actions = app
             .actions

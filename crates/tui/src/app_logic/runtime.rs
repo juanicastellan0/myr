@@ -59,6 +59,9 @@ impl TuiApp {
                     self.status_line = "Returned to Connection Wizard".to_string();
                 }
             }
+            Msg::GoProfileBookmarkManager => {
+                self.open_profile_bookmark_manager();
+            }
             Msg::ToggleHelp => self.show_help = !self.show_help,
             Msg::NextPane => {
                 if self.pane == Pane::ConnectionWizard && self.wizard_form.editing {
@@ -151,6 +154,7 @@ impl TuiApp {
             Msg::InputChar(ch) => self.handle_input_char(ch),
             Msg::InsertNewline => self.handle_insert_newline(),
             Msg::Backspace => self.handle_backspace(),
+            Msg::DeleteSelection => self.delete_manager_selection(),
             Msg::ClearInput => self.handle_clear_input(),
             Msg::Tick => self.on_tick(),
         }
@@ -276,6 +280,9 @@ impl TuiApp {
                     return;
                 }
                 self.invoke_action(ActionId::RunCurrentQuery);
+            }
+            Pane::ProfileBookmarks => {
+                self.open_manager_selection();
             }
             Pane::SchemaExplorer | Pane::Results => {
                 self.status_line = "Nothing to submit in this view".to_string();
@@ -505,14 +512,22 @@ impl TuiApp {
             notes.push(warning);
         }
 
-        match FileProfilesStore::load_default() {
-            Ok(mut store) => {
+        match self.profile_store.as_mut() {
+            Some(store) => {
                 store.upsert_profile(profile.clone());
                 if let Err(error) = store.persist() {
                     notes.push(format!("profile save failed: {error}"));
                 }
             }
-            Err(error) => notes.push(format!("profile load failed: {error}")),
+            None => match FileProfilesStore::load_default() {
+                Ok(mut store) => {
+                    store.upsert_profile(profile.clone());
+                    if let Err(error) = store.persist() {
+                        notes.push(format!("profile save failed: {error}"));
+                    }
+                }
+                Err(error) => notes.push(format!("profile load failed: {error}")),
+            },
         }
 
         let mut status = format!("Connected as `{}` in {:.1?}", profile.name, connect_latency);

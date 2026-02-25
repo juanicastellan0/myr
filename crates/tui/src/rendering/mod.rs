@@ -1,6 +1,7 @@
 mod chrome;
 mod overlays;
 mod pane_connection;
+mod pane_manager;
 mod pane_query_editor;
 mod pane_results;
 mod pane_schema;
@@ -57,6 +58,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         Pane::SchemaExplorer => (pane_schema::body_lines(app, body_area), None),
         Pane::Results => (pane_results::body_lines(app, body_area), None),
         Pane::QueryEditor => pane_query_editor::body_lines(app, body_area),
+        Pane::ProfileBookmarks => (pane_manager::body_lines(app, body_area), None),
     };
 
     let body = Paragraph::new(body_text)

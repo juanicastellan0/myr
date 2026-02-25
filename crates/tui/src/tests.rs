@@ -3,7 +3,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use myr_core::actions_engine::CopyTarget;
 use myr_core::bookmarks::{FileBookmarksStore, SavedBookmark};
-use myr_core::profiles::{ConnectionProfile, PasswordSource, TlsMode};
+use myr_core::profiles::{ConnectionProfile, FileProfilesStore, PasswordSource, TlsMode};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use tempfile::TempDir;
@@ -13,9 +13,9 @@ use super::{
     extract_key_bounds, is_connection_lost_error, is_transient_query_error, map_key_event,
     next_bookmark_name, parse_password_source, parse_read_only_flag, parse_tls_mode,
     quote_identifier, render, suggest_limit_in_editor, wizard_form_from_profile, ActionId,
-    ActionInvocation, AppView, ConnectIntent, DirectionKey, ErrorKind, Msg, MysqlDataBackend,
-    PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer, SchemaColumnViewMode,
-    SchemaLane, TuiApp, WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
+    ActionInvocation, AppView, ConnectIntent, DirectionKey, ErrorKind, ManagerLane, Msg,
+    MysqlDataBackend, PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer,
+    SchemaColumnViewMode, SchemaLane, TuiApp, WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
 };
 
 fn app_in_pane(pane: Pane) -> TuiApp {
@@ -30,6 +30,21 @@ fn app_with_bookmark_store(pane: Pane, temp_dir: &TempDir) -> TuiApp {
     let mut app = app_in_pane(pane);
     app.bookmark_store =
         Some(FileBookmarksStore::load_from_path(path).expect("failed to load test bookmark store"));
+    app
+}
+
+fn app_with_manager_stores(pane: Pane, temp_dir: &TempDir) -> TuiApp {
+    let bookmarks_path = temp_dir.path().join("bookmarks.toml");
+    let profiles_path = temp_dir.path().join("profiles.toml");
+    let mut app = app_in_pane(pane);
+    app.bookmark_store = Some(
+        FileBookmarksStore::load_from_path(bookmarks_path)
+            .expect("failed to load test bookmark store"),
+    );
+    app.profile_store = Some(
+        FileProfilesStore::load_from_path(profiles_path)
+            .expect("failed to load test profile store"),
+    );
     app
 }
 
@@ -93,7 +108,8 @@ fn pane_cycles_in_expected_order() {
     assert_eq!(Pane::ConnectionWizard.next(), Pane::SchemaExplorer);
     assert_eq!(Pane::SchemaExplorer.next(), Pane::Results);
     assert_eq!(Pane::Results.next(), Pane::QueryEditor);
-    assert_eq!(Pane::QueryEditor.next(), Pane::SchemaExplorer);
+    assert_eq!(Pane::QueryEditor.next(), Pane::ProfileBookmarks);
+    assert_eq!(Pane::ProfileBookmarks.next(), Pane::SchemaExplorer);
 }
 
 #[test]
@@ -102,6 +118,7 @@ fn pane_tab_index_matches_current_pane() {
     assert_eq!(app_in_pane(Pane::SchemaExplorer).pane_tab_index(), 1);
     assert_eq!(app_in_pane(Pane::Results).pane_tab_index(), 2);
     assert_eq!(app_in_pane(Pane::QueryEditor).pane_tab_index(), 3);
+    assert_eq!(app_in_pane(Pane::ProfileBookmarks).pane_tab_index(), 4);
 }
 
 #[test]
@@ -203,6 +220,10 @@ fn keymap_supports_required_global_keys() {
         map_key_event(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
         Some(Msg::GoConnectionWizard)
     ));
+    assert!(matches!(
+        map_key_event(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE)),
+        Some(Msg::GoProfileBookmarkManager)
+    ));
     assert!(map_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)).is_none());
     assert!(matches!(
         map_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
@@ -227,6 +248,10 @@ fn keymap_supports_required_global_keys() {
     assert!(matches!(
         map_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)),
         Some(Msg::ToggleSchemaColumnView)
+    ));
+    assert!(matches!(
+        map_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+        Some(Msg::DeleteSelection)
     ));
     assert!(matches!(
         map_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT)),
@@ -531,6 +556,69 @@ fn save_and_open_bookmark_paths_round_trip() {
         "SELECT user_id FROM `app`.`events` LIMIT 5"
     );
     assert!(app.status_line.starts_with("Opened bookmark"));
+}
+
+#[test]
+fn manager_can_open_and_delete_profiles_and_bookmarks() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let mut app = app_with_manager_stores(Pane::SchemaExplorer, &temp_dir);
+
+    let mut profile = ConnectionProfile::new("qa-profile", "127.0.0.1", "root");
+    profile.port = 33306;
+    profile.database = Some("myr_bench".to_string());
+    profile.read_only = true;
+    {
+        let store = app.profile_store.as_mut().expect("profile store");
+        store.upsert_profile(profile.clone());
+        store.persist().expect("persist profile store");
+    }
+
+    let mut bookmark = SavedBookmark::new("qa-profile:myr_bench.events");
+    bookmark.profile_name = Some("qa-profile".to_string());
+    bookmark.database = Some("myr_bench".to_string());
+    bookmark.table = Some("events".to_string());
+    bookmark.column = Some("user_id".to_string());
+    bookmark.query = Some("SELECT user_id FROM `myr_bench`.`events` LIMIT 5".to_string());
+    {
+        let store = app.bookmark_store.as_mut().expect("bookmark store");
+        store.upsert_bookmark(bookmark);
+        store.persist().expect("persist bookmark store");
+    }
+
+    app.handle(Msg::GoProfileBookmarkManager);
+    assert_eq!(app.pane, Pane::ProfileBookmarks);
+
+    app.submit();
+    assert_eq!(app.pane, Pane::ConnectionWizard);
+    assert_eq!(app.wizard_form.profile_name, "qa-profile");
+
+    app.handle(Msg::GoProfileBookmarkManager);
+    app.navigate(DirectionKey::Right);
+    assert_eq!(app.manager_lane, ManagerLane::Bookmarks);
+
+    app.submit();
+    assert_eq!(app.pane, Pane::QueryEditor);
+    assert_eq!(app.selection.table.as_deref(), Some("events"));
+
+    app.handle(Msg::GoProfileBookmarkManager);
+    app.handle(Msg::DeleteSelection);
+    assert!(app.status_line.starts_with("Deleted bookmark"));
+    assert!(app
+        .bookmark_store
+        .as_ref()
+        .expect("bookmark store")
+        .bookmarks()
+        .is_empty());
+
+    app.navigate(DirectionKey::Left);
+    app.handle(Msg::DeleteSelection);
+    assert!(app.status_line.starts_with("Deleted profile"));
+    assert!(app
+        .profile_store
+        .as_ref()
+        .expect("profile store")
+        .profiles()
+        .is_empty());
 }
 
 #[test]
@@ -1045,6 +1133,9 @@ fn rendering_covers_all_panes_and_popups() {
     let editor = app_in_pane(Pane::QueryEditor);
     render_once(&editor);
 
+    let manager = app_in_pane(Pane::ProfileBookmarks);
+    render_once(&manager);
+
     let mut exit_confirm = app_in_pane(Pane::Results);
     exit_confirm.exit_confirmation = true;
     render_once(&exit_confirm);
@@ -1116,6 +1207,16 @@ fn submit_in_non_submittable_panes_sets_status() {
     let mut results = app_in_pane(Pane::Results);
     results.submit();
     assert_eq!(results.status_line, "Nothing to submit in this view");
+}
+
+#[test]
+fn delete_selection_requires_manager_view() {
+    let mut app = app_in_pane(Pane::Results);
+    app.handle(Msg::DeleteSelection);
+    assert_eq!(
+        app.status_line,
+        "Delete selection is only available in manager view"
+    );
 }
 
 #[test]

@@ -120,6 +120,16 @@ pub(crate) fn default_bookmark_store() -> Option<FileBookmarksStore> {
     FileBookmarksStore::load_default().ok()
 }
 
+#[cfg(test)]
+pub(crate) fn default_profile_store() -> Option<FileProfilesStore> {
+    None
+}
+
+#[cfg(not(test))]
+pub(crate) fn default_profile_store() -> Option<FileProfilesStore> {
+    FileProfilesStore::load_default().ok()
+}
+
 pub(crate) fn previous_char_boundary(text: &str, index: usize) -> usize {
     let clamped = index.min(text.len());
     if clamped == 0 {
@@ -406,12 +416,14 @@ pub(crate) fn map_key_event(key: KeyEvent) -> Option<Msg> {
         KeyCode::Tab => Some(Msg::NextPane),
         KeyCode::F(5) => Some(Msg::Connect),
         KeyCode::F(6) => Some(Msg::GoConnectionWizard),
+        KeyCode::F(7) => Some(Msg::GoProfileBookmarkManager),
         KeyCode::F(10) => Some(Msg::Quit),
         KeyCode::F(2) => Some(Msg::TogglePerfOverlay),
         KeyCode::F(3) => Some(Msg::ToggleSafeMode),
         KeyCode::F(4) => Some(Msg::ToggleSchemaColumnView),
         KeyCode::Enter => Some(Msg::Submit),
         KeyCode::Backspace => Some(Msg::Backspace),
+        KeyCode::Delete => Some(Msg::DeleteSelection),
         KeyCode::Up => Some(Msg::Navigate(DirectionKey::Up)),
         KeyCode::Down => Some(Msg::Navigate(DirectionKey::Down)),
         KeyCode::Left => Some(Msg::Navigate(DirectionKey::Left)),

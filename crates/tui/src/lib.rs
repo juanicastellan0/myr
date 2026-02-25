@@ -69,6 +69,7 @@ enum Pane {
     SchemaExplorer,
     Results,
     QueryEditor,
+    ProfileBookmarks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +133,34 @@ impl Pane {
             Self::ConnectionWizard => Self::SchemaExplorer,
             Self::SchemaExplorer => Self::Results,
             Self::Results => Self::QueryEditor,
-            Self::QueryEditor => Self::SchemaExplorer,
+            Self::QueryEditor => Self::ProfileBookmarks,
+            Self::ProfileBookmarks => Self::SchemaExplorer,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagerLane {
+    Profiles,
+    Bookmarks,
+}
+
+impl ManagerLane {
+    fn next(self) -> Self {
+        match self {
+            Self::Profiles => Self::Bookmarks,
+            Self::Bookmarks => Self::Profiles,
+        }
+    }
+
+    fn previous(self) -> Self {
+        self.next()
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Profiles => "Profiles",
+            Self::Bookmarks => "Bookmarks",
         }
     }
 }
@@ -222,6 +250,7 @@ enum DirectionKey {
 enum Msg {
     Quit,
     GoConnectionWizard,
+    GoProfileBookmarkManager,
     ToggleHelp,
     NextPane,
     TogglePalette,
@@ -235,6 +264,7 @@ enum Msg {
     InputChar(char),
     InsertNewline,
     Backspace,
+    DeleteSelection,
     ClearInput,
     Connect,
     Tick,
@@ -377,7 +407,11 @@ struct TuiApp {
     status_line: String,
     audit_trail: Option<FileAuditTrail>,
     bookmark_store: Option<FileBookmarksStore>,
+    profile_store: Option<FileProfilesStore>,
     bookmark_cycle_index: usize,
+    manager_lane: ManagerLane,
+    manager_profile_cursor: usize,
+    manager_bookmark_cursor: usize,
     query_editor_text: String,
     query_cursor: usize,
     query_history: Vec<String>,
