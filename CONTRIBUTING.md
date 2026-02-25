@@ -23,6 +23,7 @@ Thanks for contributing.
 ## CI quality gates
 
 - CI enforces formatting, clippy, tests, build, perf smoke checks, and coverage.
+- CI also gates adapter integration compatibility on MariaDB (`mariadb:11.4`).
 - Coverage gate currently requires at least `80%` line coverage.
 - See `.github/workflows/ci.yml` and `docs/quality.md`.
 

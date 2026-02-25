@@ -185,6 +185,40 @@ jobs:
       - name: Run gated TUI integration test
         run: cargo test -p myr-tui mysql_query_path_streams_rows_when_enabled -- --nocapture
 
+  mariadb-integration:
+    name: MariaDB integration (adapters)
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -uroot -proot --silent || mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    env:
+      MYR_DB_PASSWORD: root
+      MYR_RUN_MYSQL_INTEGRATION: "1"
+      MYR_TEST_DB_HOST: 127.0.0.1
+      MYR_TEST_DB_PORT: "3306"
+      MYR_TEST_DB_USER: root
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run adapter integration test suite on MariaDB
+        run: cargo test -p myr-adapters --test mysql_integration -- --nocapture
+
   cross-platform:
     name: Cross-platform validation (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

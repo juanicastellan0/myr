@@ -36,6 +36,9 @@ Current gate settings:
 - MySQL integration coverage enabled with:
   - `MYR_DB_PASSWORD=root`
   - `MYR_RUN_MYSQL_INTEGRATION=1`
+- MariaDB compatibility lane:
+  - service image: `mariadb:11.4`
+  - command: `cargo test -p myr-adapters --test mysql_integration -- --nocapture`
 - gated TUI MySQL query-path integration:
   - `MYR_DB_PASSWORD=root`
   - `MYR_RUN_TUI_MYSQL_INTEGRATION=1`
@@ -56,6 +59,13 @@ Optional local integration commands:
 
 ```bash
 MYR_DB_PASSWORD=root MYR_RUN_MYSQL_INTEGRATION=1 \
+  cargo test -p myr-adapters --test mysql_integration -- --nocapture
+
+# Same test suite against a local MariaDB instance.
+# Example service: docker run --rm --name myr-mariadb \
+#   -e MARIADB_ROOT_PASSWORD=root -p 33307:3306 mariadb:11.4
+MYR_DB_PASSWORD=root MYR_RUN_MYSQL_INTEGRATION=1 \
+  MYR_TEST_DB_HOST=127.0.0.1 MYR_TEST_DB_PORT=33307 MYR_TEST_DB_USER=root \
   cargo test -p myr-adapters --test mysql_integration -- --nocapture
 
 MYR_DB_PASSWORD=root MYR_RUN_TUI_MYSQL_INTEGRATION=1 \
