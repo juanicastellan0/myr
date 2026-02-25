@@ -114,6 +114,7 @@ impl TuiApp {
                     "Safe mode disabled".to_string()
                 };
             }
+            Msg::ToggleSchemaColumnView => self.toggle_schema_column_view_mode(),
             Msg::Submit => self.submit(),
             Msg::Connect => self.connect(),
             Msg::CancelQuery => {
@@ -484,6 +485,7 @@ impl TuiApp {
         self.selected_table_index = 0;
         self.selection.table = None;
         self.schema_columns.clear();
+        self.schema_column_schemas.clear();
         self.selected_column_index = 0;
         self.selection.column = None;
         self.schema_relationships.clear();

@@ -14,8 +14,8 @@ use super::{
     next_bookmark_name, parse_password_source, parse_read_only_flag, parse_tls_mode,
     quote_identifier, render, suggest_limit_in_editor, wizard_form_from_profile, ActionId,
     ActionInvocation, AppView, ConnectIntent, DirectionKey, ErrorKind, Msg, MysqlDataBackend,
-    PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer, SchemaLane, TuiApp,
-    WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
+    PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer, SchemaColumnViewMode,
+    SchemaLane, TuiApp, WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
 };
 
 fn app_in_pane(pane: Pane) -> TuiApp {
@@ -225,6 +225,10 @@ fn keymap_supports_required_global_keys() {
         Some(Msg::ToggleSafeMode)
     ));
     assert!(matches!(
+        map_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)),
+        Some(Msg::ToggleSchemaColumnView)
+    ));
+    assert!(matches!(
         map_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT)),
         Some(Msg::Navigate(DirectionKey::Left))
     ));
@@ -359,6 +363,28 @@ fn schema_table_navigation_updates_column_selection() {
 
     assert_eq!(app.selection.table.as_deref(), Some("sessions"));
     assert_eq!(app.selection.column.as_deref(), Some("id"));
+}
+
+#[test]
+fn schema_column_view_mode_toggles_in_schema_explorer_only() {
+    let mut app = app_in_pane(Pane::SchemaExplorer);
+    assert_eq!(app.schema_column_view_mode, SchemaColumnViewMode::Compact);
+
+    app.handle(Msg::ToggleSchemaColumnView);
+    assert_eq!(app.schema_column_view_mode, SchemaColumnViewMode::Full);
+    assert_eq!(app.status_line, "Schema columns view: full");
+
+    app.handle(Msg::ToggleSchemaColumnView);
+    assert_eq!(app.schema_column_view_mode, SchemaColumnViewMode::Compact);
+    assert_eq!(app.status_line, "Schema columns view: compact");
+
+    app.pane = Pane::QueryEditor;
+    app.handle(Msg::ToggleSchemaColumnView);
+    assert_eq!(app.schema_column_view_mode, SchemaColumnViewMode::Compact);
+    assert_eq!(
+        app.status_line,
+        "Schema column view toggle is available in Schema Explorer"
+    );
 }
 
 #[test]

@@ -27,7 +27,9 @@ use myr_core::profiles::{ConnectionProfile, FileProfilesStore, PasswordSource, T
 use myr_core::query_runner::{CancellationToken, QueryRow, QueryRunner};
 use myr_core::results_buffer::ResultsRingBuffer;
 use myr_core::safe_mode::{assess_sql_safety, ConfirmationToken, GuardDecision, SafeModeGuard};
-use myr_core::schema_cache::{RelationshipDirection, SchemaCacheService, TableRelationship};
+use myr_core::schema_cache::{
+    ColumnSchema, RelationshipDirection, SchemaCacheService, TableRelationship,
+};
 use myr_core::sql_generator::{
     keyset_first_page_sql, keyset_page_sql, offset_page_sql, PaginationDirection, SqlTarget,
 };
@@ -54,7 +56,6 @@ const AUDIT_ERROR_MAX_CHARS: usize = 400;
 const BOOKMARK_NAME_MAX_CHARS: usize = 64;
 
 const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events"];
-const DEMO_SCHEMA_COLUMNS: [&str; 4] = ["id", "email", "created_at", "updated_at"];
 
 #[derive(Debug, Error)]
 pub enum TuiError {
@@ -99,6 +100,28 @@ impl SchemaLane {
             Self::Databases => "Databases",
             Self::Tables => "Tables",
             Self::Columns => "Columns",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaColumnViewMode {
+    Compact,
+    Full,
+}
+
+impl SchemaColumnViewMode {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Compact => Self::Full,
+            Self::Full => Self::Compact,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Full => "full",
         }
     }
 }
@@ -204,6 +227,7 @@ enum Msg {
     TogglePalette,
     TogglePerfOverlay,
     ToggleSafeMode,
+    ToggleSchemaColumnView,
     Submit,
     CancelQuery,
     Navigate(DirectionKey),
@@ -300,10 +324,12 @@ struct TuiApp {
     schema_tables: Vec<String>,
     selected_table_index: usize,
     schema_columns: Vec<String>,
+    schema_column_schemas: Vec<ColumnSchema>,
     selected_column_index: usize,
     schema_relationships: Vec<TableRelationship>,
     selected_relationship_index: usize,
     schema_lane: SchemaLane,
+    schema_column_view_mode: SchemaColumnViewMode,
     schema_database_filter: String,
     schema_table_filter: String,
     schema_column_filter: String,

@@ -50,9 +50,9 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
   - Horizontal scroll and viewport indicator.
   - Sticky header row + clearer selected-row/selected-column emphasis.
   - Better width strategy for long text/JSON cells.
-- [ ] Schema explorer v2:
+- [x] Schema explorer v2:
   - [x] Filter-as-you-type for database/table/column lists.
-  - [ ] Optional compact/full metadata view for columns.
+  - [x] Optional compact/full metadata view for columns.
 - [ ] Query editor v2:
   - Explicit cursor row/column ruler and active SQL region emphasis.
   - Improved multiline ergonomics for long statements.
@@ -105,7 +105,6 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 ## Next Up (Proposed Execution Order)
 
 - [ ] Remove adapter panic path + add regression test.
-- [ ] Add Schema Explorer compact/full metadata view (columns lane).
 - [ ] Add profile/bookmark manager screen (list/select/rename/delete).
 - [ ] Add architecture notes in `docs/architecture.md`.
 - [ ] Split `app/src/bin/benchmark.rs` into parser/runner/report modules.

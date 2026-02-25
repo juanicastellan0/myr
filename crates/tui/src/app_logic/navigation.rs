@@ -115,6 +115,20 @@ impl TuiApp {
         self.apply_active_schema_filter();
     }
 
+    pub(super) fn toggle_schema_column_view_mode(&mut self) {
+        if self.pane != Pane::SchemaExplorer {
+            self.status_line =
+                "Schema column view toggle is available in Schema Explorer".to_string();
+            return;
+        }
+
+        self.schema_column_view_mode = self.schema_column_view_mode.toggle();
+        self.status_line = format!(
+            "Schema columns view: {}",
+            self.schema_column_view_mode.label()
+        );
+    }
+
     fn active_schema_filter(&self) -> &str {
         match self.schema_lane {
             SchemaLane::Databases => self.schema_database_filter.as_str(),
@@ -370,6 +384,7 @@ impl TuiApp {
     pub(super) fn reload_columns_for_selected_table(&mut self) {
         let Some(table_name) = self.selection.table.clone() else {
             self.schema_columns.clear();
+            self.schema_column_schemas.clear();
             self.selected_column_index = 0;
             self.selection.column = None;
             self.schema_relationships.clear();
@@ -379,21 +394,29 @@ impl TuiApp {
 
         if let Some(schema_cache) = self.schema_cache.as_mut() {
             if let Some(database_name) = self.active_database.clone() {
-                self.schema_columns =
+                self.schema_column_schemas =
                     match block_on_result(schema_cache.list_columns(&database_name, &table_name)) {
-                        Ok(columns) => columns.into_iter().map(|column| column.name).collect(),
+                        Ok(columns) => columns,
                         Err(error) => {
                             self.status_line = format!("Column fetch failed: {error}");
                             Vec::new()
                         }
                     };
+                self.schema_columns = self
+                    .schema_column_schemas
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect();
             } else {
                 self.schema_columns.clear();
+                self.schema_column_schemas.clear();
             }
         } else {
-            self.schema_columns = DEMO_SCHEMA_COLUMNS
+            self.schema_column_schemas = demo_column_schemas();
+            self.schema_columns = self
+                .schema_column_schemas
                 .iter()
-                .map(|column| (*column).to_string())
+                .map(|column| column.name.clone())
                 .collect();
         }
 

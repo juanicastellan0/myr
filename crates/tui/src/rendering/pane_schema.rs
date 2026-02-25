@@ -6,7 +6,7 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from("Schema Explorer"),
         Line::from(
-            "Left/Right: lane focus | Up/Down: selection | Type to filter lane | 1: preview table",
+            "Left/Right: lane focus | Up/Down: selection | Type to filter lane | F4: column view | 1: preview table",
         ),
         Line::from(format!(
             "Focus lane: {} | Active DB: {}",
@@ -36,6 +36,7 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
         app.schema_lane == SchemaLane::Databases,
         section_window,
         app.schema_database_filter.as_str(),
+        None,
     );
 
     lines.push(Line::from(""));
@@ -58,16 +59,19 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
         app.schema_lane == SchemaLane::Tables,
         section_window,
         app.schema_table_filter.as_str(),
+        None,
     );
 
     lines.push(Line::from(""));
     let column_matches =
         filtered_item_indices(&app.schema_columns, app.schema_column_filter.as_str());
+    let column_items = schema_column_items(app);
     lines.push(Line::from(Span::styled(
         format!(
-            "Columns ({}/{}) | filter `{}`",
+            "Columns ({}/{}) | view {} | filter `{}`",
             column_matches.len(),
             app.schema_columns.len(),
+            app.schema_column_view_mode.label(),
             display_filter_value(app.schema_column_filter.as_str())
         ),
         Style::default()
@@ -76,11 +80,12 @@ pub(super) fn body_lines(app: &TuiApp, body_area: Rect) -> Vec<Line<'static>> {
     )));
     append_windowed_schema_items(
         &mut lines,
-        &app.schema_columns,
+        &column_items,
         app.selected_column_index,
         app.schema_lane == SchemaLane::Columns,
         section_window,
         app.schema_column_filter.as_str(),
+        Some(&app.schema_columns),
     );
 
     lines.push(Line::from(""));
@@ -107,13 +112,14 @@ fn append_windowed_schema_items(
     active: bool,
     max_visible: usize,
     filter: &str,
+    filter_source: Option<&[String]>,
 ) {
     if items.is_empty() {
         lines.push(Line::from("  (none)"));
         return;
     }
 
-    let filtered = filtered_item_indices(items, filter);
+    let filtered = filtered_item_indices(filter_source.unwrap_or(items), filter);
     if filtered.is_empty() {
         lines.push(Line::from("  (no matches)"));
         return;
@@ -166,6 +172,31 @@ fn append_windowed_schema_items(
     if end < filtered.len() {
         lines.push(Line::from(format!("  ... {} more", filtered.len() - end)));
     }
+}
+
+fn schema_column_items(app: &TuiApp) -> Vec<String> {
+    if app.schema_column_view_mode == SchemaColumnViewMode::Compact {
+        return app.schema_columns.clone();
+    }
+
+    if app.schema_column_schemas.len() == app.schema_columns.len() {
+        return app
+            .schema_column_schemas
+            .iter()
+            .map(format_column_metadata)
+            .collect();
+    }
+
+    app.schema_columns.clone()
+}
+
+fn format_column_metadata(column: &ColumnSchema) -> String {
+    let default_value = column.default_value.as_deref().unwrap_or("-");
+    let nullability = if column.nullable { "NULL" } else { "NOT NULL" };
+    format!(
+        "{} | {} | {} | default {default_value}",
+        column.name, column.data_type, nullability
+    )
 }
 
 fn filtered_item_indices(items: &[String], filter: &str) -> Vec<usize> {
@@ -246,5 +277,52 @@ fn append_windowed_relationship_items(
             "  ... {} more",
             relationships.len() - end
         )));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_column_view_renders_metadata_lines() {
+        let mut app = TuiApp {
+            schema_lane: SchemaLane::Columns,
+            schema_column_view_mode: SchemaColumnViewMode::Full,
+            ..TuiApp::default()
+        };
+        app.schema_column_filter.clear();
+        let lines = body_lines(&app, Rect::new(0, 0, 120, 40));
+        let rendered = lines
+            .iter()
+            .map(line_to_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("view full"));
+        assert!(rendered.contains("id | bigint unsigned | NOT NULL"));
+        assert!(rendered.contains("created_at | timestamp | NOT NULL | default CURRENT_TIMESTAMP"));
+    }
+
+    #[test]
+    fn format_column_metadata_handles_nullable_defaults() {
+        let column = ColumnSchema {
+            name: "deleted_at".to_string(),
+            data_type: "timestamp".to_string(),
+            nullable: true,
+            default_value: None,
+        };
+
+        assert_eq!(
+            format_column_metadata(&column),
+            "deleted_at | timestamp | NULL | default -"
+        );
+    }
+
+    fn line_to_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 }

@@ -27,6 +27,7 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 
 - Connection wizard with persisted profiles
 - Schema explorer lanes for databases, tables, and columns
+- Schema Explorer filter-as-you-type plus compact/full column metadata toggle (`F4`)
 - Runtime status strip with animated app heartbeat + DB state (`[x]` disconnected, `[~]` connecting, `[+]` connected)
 - Pane tabs with active-pane flash animation on tab/view changes
 - Context-aware next actions in footer + command palette

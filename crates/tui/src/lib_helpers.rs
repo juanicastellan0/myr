@@ -350,6 +350,35 @@ where
     runtime.block_on(future).map_err(|error| error.to_string())
 }
 
+pub(crate) fn demo_column_schemas() -> Vec<ColumnSchema> {
+    vec![
+        ColumnSchema {
+            name: "id".to_string(),
+            data_type: "bigint unsigned".to_string(),
+            nullable: false,
+            default_value: None,
+        },
+        ColumnSchema {
+            name: "email".to_string(),
+            data_type: "varchar(255)".to_string(),
+            nullable: false,
+            default_value: None,
+        },
+        ColumnSchema {
+            name: "created_at".to_string(),
+            data_type: "timestamp".to_string(),
+            nullable: false,
+            default_value: Some("CURRENT_TIMESTAMP".to_string()),
+        },
+        ColumnSchema {
+            name: "updated_at".to_string(),
+            data_type: "timestamp".to_string(),
+            nullable: false,
+            default_value: Some("CURRENT_TIMESTAMP".to_string()),
+        },
+    ]
+}
+
 pub(crate) fn map_key_event(key: KeyEvent) -> Option<Msg> {
     if key.modifiers == KeyModifiers::CONTROL {
         return match key.code {
@@ -380,6 +409,7 @@ pub(crate) fn map_key_event(key: KeyEvent) -> Option<Msg> {
         KeyCode::F(10) => Some(Msg::Quit),
         KeyCode::F(2) => Some(Msg::TogglePerfOverlay),
         KeyCode::F(3) => Some(Msg::ToggleSafeMode),
+        KeyCode::F(4) => Some(Msg::ToggleSchemaColumnView),
         KeyCode::Enter => Some(Msg::Submit),
         KeyCode::Backspace => Some(Msg::Backspace),
         KeyCode::Up => Some(Msg::Navigate(DirectionKey::Up)),

@@ -1,5 +1,6 @@
 impl Default for TuiApp {
     fn default() -> Self {
+        let demo_columns = demo_column_schemas();
         Self {
             actions: ActionsEngine::new(),
             pane: Pane::ConnectionWizard,
@@ -16,14 +17,16 @@ impl Default for TuiApp {
                 .map(|table| (*table).to_string())
                 .collect(),
             selected_table_index: 0,
-            schema_columns: DEMO_SCHEMA_COLUMNS
+            schema_columns: demo_columns
                 .iter()
-                .map(|column| (*column).to_string())
+                .map(|column| column.name.clone())
                 .collect(),
+            schema_column_schemas: demo_columns,
             selected_column_index: 0,
             schema_relationships: demo_relationships(Some("app"), Some("users")),
             selected_relationship_index: 0,
             schema_lane: SchemaLane::Tables,
+            schema_column_view_mode: SchemaColumnViewMode::Compact,
             schema_database_filter: String::new(),
             schema_table_filter: String::new(),
             schema_column_filter: String::new(),

@@ -106,6 +106,7 @@ Steps:
 5. Move to `Columns` lane (`Right`) and type `upd`.
 6. Confirm selection moves to `updated_at`.
 7. Press `Backspace` and then `Ctrl+U`.
+8. Press `F4` to switch to full metadata mode; press `F4` again to return to compact mode.
 
 Expected:
 
@@ -113,6 +114,7 @@ Expected:
 - Selection is constrained to matching entries and `Up`/`Down` navigate within matches.
 - Section headers show match counts and the active filter text.
 - `Backspace` removes one filter character and `Ctrl+U` clears the active lane filter.
+- Columns lane can switch between compact names and full metadata display (`name | type | nullability | default`).
 
 ## Query and Results
 

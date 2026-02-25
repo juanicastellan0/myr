@@ -15,6 +15,7 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>) {
         Line::from("Query editor: Left/Right cursor, Up/Down history"),
         Line::from("F2: toggle perf overlay"),
         Line::from("F3: toggle safe mode"),
+        Line::from("F4: toggle schema column compact/full view"),
         Line::from("Ctrl+P: command palette"),
         Line::from("Palette actions include bookmark save/open + related-table jumps"),
         Line::from("Ctrl+U: clear current input"),
