@@ -53,7 +53,7 @@ jobs:
           --health-timeout=5s
           --health-retries=30
     env:
-      COVERAGE_MIN_LINES: "80"
+      COVERAGE_MIN_LINES: "85"
       MYR_DB_PASSWORD: root
       MYR_RUN_MYSQL_INTEGRATION: "1"
       MYR_TEST_DB_HOST: 127.0.0.1

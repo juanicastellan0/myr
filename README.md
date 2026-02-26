@@ -99,7 +99,7 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 - Coverage report:
   - `cargo llvm-cov --workspace --all-features --html --output-dir target/coverage/html`
 - CI coverage gate:
-  - minimum lines: `80%`
+  - minimum lines: `85%`
   - MySQL-backed integration tests enabled via `MYR_RUN_MYSQL_INTEGRATION=1`
   - MariaDB compatibility lane runs `myr-adapters` integration test suite on `mariadb:11.4`
   - TUI MySQL integration gate enabled via `MYR_RUN_TUI_MYSQL_INTEGRATION=1`
