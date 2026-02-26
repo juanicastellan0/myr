@@ -1,0 +1,29 @@
+{
+  "version": "0.1.1",
+  "description": "Terminal-first MySQL/MariaDB schema and data explorer",
+  "homepage": "https://github.com/juanicastellan0/myr",
+  "license": "MIT",
+  "depends": "rustup",
+  "url": "https://github.com/juanicastellan0/myr/archive/refs/tags/v0.1.1.zip",
+  "hash": "skip",
+  "pre_install": [
+    "$sourceRoot = Get-ChildItem -Path $dir -Directory | Select-Object -First 1",
+    "if (-not $sourceRoot) { throw 'Could not locate extracted source directory.' }",
+    "Push-Location $sourceRoot.FullName",
+    "$env:CARGO_TARGET_DIR = \"$dir\\target\"",
+    "cargo install --locked --path app --root \"$dir\"",
+    "Pop-Location"
+  ],
+  "bin": "bin\\myr-app.exe",
+  "checkver": {
+    "github": "https://github.com/juanicastellan0/myr"
+  },
+  "autoupdate": {
+    "url": "https://github.com/juanicastellan0/myr/archive/refs/tags/v$version.zip",
+    "hash": "skip"
+  },
+  "notes": [
+    "Installs from source and compiles locally.",
+    "First install can take a few minutes while Cargo builds dependencies."
+  ]
+}

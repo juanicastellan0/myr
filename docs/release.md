@@ -6,6 +6,7 @@ This project publishes release binaries from Git tags via `.github/workflows/rel
 
 - `main` is green in CI.
 - `[workspace.package].version` in `Cargo.toml` is the version you intend to release.
+- `Formula/myr.rb` and `bucket/myr.json` are synced to the release version/revision.
 - You have push permission for tags on the repository.
 
 ## Create a Release
@@ -19,7 +20,23 @@ cargo test
 cargo build
 ```
 
-2. Create and push an annotated tag that matches the workspace version:
+2. Sync Homebrew/Scoop install channels to the current commit:
+
+```bash
+version="$(awk '
+  /^\[workspace\.package\]$/ { in_section=1; next }
+  /^\[/ { in_section=0 }
+  in_section && $1=="version" {
+    gsub(/"/, "", $3)
+    print $3
+    exit
+  }
+' Cargo.toml)"
+scripts/update-install-channels.sh "${version}" "$(git rev-parse HEAD)"
+git add Formula/myr.rb bucket/myr.json
+```
+
+3. Create and push an annotated tag that matches the workspace version:
 
 ```bash
 git tag -a v0.1.0 -m "v0.1.0"
@@ -44,6 +61,12 @@ git push origin v0.1.0
 - Publishes a GitHub Release with generated notes and:
   - `*.tar.gz` and `*.zip` artifacts
   - `SHA256SUMS.txt`
+
+## Install Channels
+
+- Homebrew tap formula is stored at `Formula/myr.rb`.
+- Scoop bucket manifest is stored at `bucket/myr.json`.
+- Both files are generated/updated via `scripts/update-install-channels.sh`.
 
 ## If a Release Fails
 

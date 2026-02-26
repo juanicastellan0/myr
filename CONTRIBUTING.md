@@ -17,6 +17,9 @@ Thanks for contributing.
 - Run coverage locally when your change affects core behavior:
   - `cargo llvm-cov --workspace --all-features --summary-only`
 - Update docs when behavior or architecture changes.
+- If you change `[workspace.package].version`, also update install channels:
+  - `scripts/update-install-channels.sh <version> "$(git rev-parse HEAD)"`
+  - commit `Formula/myr.rb` and `bucket/myr.json` in the same change.
 - If you add or modify runtime env configuration (for example audit retention vars),
   update `README.md`, `docs/manual-testing.md`, and `docs/quality.md` in the same change.
 

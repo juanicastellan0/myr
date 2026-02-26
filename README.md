@@ -23,6 +23,26 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 3. Run `cargo test` to verify baseline health.
 4. Start the app with `cargo run -p myr-app`.
 
+## Install Channels
+
+Homebrew tap:
+
+```bash
+brew tap juanicastellan0/myr
+brew install myr
+```
+
+Scoop bucket:
+
+```powershell
+scoop bucket add myr https://github.com/juanicastellan0/myr
+scoop install myr/myr
+```
+
+Notes:
+- The installed executable is `myr-app`.
+- Both channels currently install from source (`rust`/`rustup` is required).
+
 ## Key Features
 
 - Connection wizard with persisted profiles
