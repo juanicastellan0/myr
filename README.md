@@ -49,7 +49,7 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
   - Keyset pagination for detected `id` / `*_id` keys
   - OFFSET fallback when keyset is unavailable
 - Export to streaming CSV/JSON plus JSONL and gzip variants
-- Benchmark runner + CI perf smoke checks with persisted perf metric artifacts
+- Benchmark runner + CI perf smoke checks with persisted perf metric artifacts and trend-policy guardrails
 
 ## Visual Status Cues
 
@@ -74,6 +74,8 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 - Start local benchmark DB: `docker compose -f bench/docker-compose.yml up -d --wait`
 - Run benchmark runner:
   - `MYR_DB_PASSWORD=root cargo run -p myr-app --bin benchmark -- --host 127.0.0.1 --port 33306 --user root --database myr_bench --seed-rows 50000`
+- Run benchmark with trend policy checks:
+  - `MYR_DB_PASSWORD=root cargo run -p myr-app --bin benchmark -- --host 127.0.0.1 --port 33306 --user root --database myr_bench --seed-rows 10000 --trend-policy bench/perf-trend-policy.json`
 - One-command setup/run/teardown:
   - `bench/scripts/run_benchmark.sh`
 - One-command local connection test dataset:

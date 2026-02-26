@@ -18,12 +18,21 @@ mod tests;
 
 use model::BenchMetricsSnapshot;
 use parser::parse_args;
-use report::{enforce_assertions, peak_memory_bytes_best_effort, write_metrics_file};
+use report::{
+    enforce_assertions, enforce_trend_guard, load_trend_guard_policy,
+    peak_memory_bytes_best_effort, trend_guard_thresholds, write_metrics_file,
+};
 use runner::{ensure_seed_data, run_query_benchmark};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_args()?;
+    let trend_policy = config
+        .trend_policy
+        .as_deref()
+        .map(load_trend_guard_policy)
+        .transpose()?;
+
     let mut profile = ConnectionProfile::new(
         config.profile_name.clone(),
         config.host.clone(),
@@ -79,6 +88,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = config.metrics_output.as_deref() {
         write_metrics_file(path, &config, snapshot)?;
         println!("metric.output_file={path}");
+    }
+
+    if let Some(policy) = trend_policy.as_ref() {
+        let thresholds = trend_guard_thresholds(policy);
+        println!("metric.trend_policy={}", policy.label);
+        println!(
+            "metric.trend_connect_ms_max={:.3}",
+            thresholds.max_connect_ms
+        );
+        println!(
+            "metric.trend_first_row_ms_max={:.3}",
+            thresholds.max_first_row_ms
+        );
+        println!(
+            "metric.trend_rows_per_sec_min={:.3}",
+            thresholds.min_rows_per_sec
+        );
+        enforce_trend_guard(policy, &snapshot)?;
     }
 
     enforce_assertions(&config, first_row_ms, rows_per_sec)?;

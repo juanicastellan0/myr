@@ -93,7 +93,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 - [x] Add optional keyring smoke checks for linux/macos/windows runners.
 - [x] Add rendering snapshot-style tests for key panes/popups.
 - [x] Raise coverage gate from `80%` to `85%` once flaky/low-value tests are addressed.
-- [ ] Define benchmark trend guard policy (baseline file + tolerance windows).
+- [x] Define benchmark trend guard policy (baseline file + tolerance windows).
 
 ## M13: Distribution and Adoption
 

@@ -1,10 +1,28 @@
 use std::io;
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::io_other;
 use crate::model::{BenchMetricsSnapshot, BenchmarkConfig};
+
+#[derive(Debug, Clone)]
+pub(crate) struct TrendGuardPolicy {
+    pub(crate) label: String,
+    pub(crate) baseline_connect_ms: f64,
+    pub(crate) baseline_first_row_ms: f64,
+    pub(crate) baseline_rows_per_sec: f64,
+    pub(crate) max_connect_regression_pct: f64,
+    pub(crate) max_first_row_regression_pct: f64,
+    pub(crate) max_rows_per_sec_regression_pct: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TrendGuardThresholds {
+    pub(crate) max_connect_ms: f64,
+    pub(crate) max_first_row_ms: f64,
+    pub(crate) min_rows_per_sec: f64,
+}
 
 pub(crate) fn enforce_assertions(
     config: &BenchmarkConfig,
@@ -30,6 +48,159 @@ pub(crate) fn enforce_assertions(
     }
 
     Ok(())
+}
+
+pub(crate) fn load_trend_guard_policy(path: &str) -> io::Result<TrendGuardPolicy> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| io_other(format!("failed to read trend policy `{path}`: {error}")))?;
+    let policy: Value = serde_json::from_str(&raw)
+        .map_err(|error| io_other(format!("failed to parse trend policy `{path}`: {error}")))?;
+
+    let version = required_u64(&policy, "/version")?;
+    if version != 1 {
+        return Err(io_other(format!(
+            "unsupported trend policy version {version}; expected 1"
+        )));
+    }
+
+    Ok(TrendGuardPolicy {
+        label: required_string(&policy, "/label")?.to_string(),
+        baseline_connect_ms: required_non_negative_f64(&policy, "/baseline/connect_ms")?,
+        baseline_first_row_ms: required_non_negative_f64(&policy, "/baseline/first_row_ms")?,
+        baseline_rows_per_sec: required_positive_f64(&policy, "/baseline/rows_per_sec")?,
+        max_connect_regression_pct: required_non_negative_f64(
+            &policy,
+            "/tolerance/connect_ms_regression_pct",
+        )?,
+        max_first_row_regression_pct: required_non_negative_f64(
+            &policy,
+            "/tolerance/first_row_ms_regression_pct",
+        )?,
+        max_rows_per_sec_regression_pct: required_bounded_f64(
+            &policy,
+            "/tolerance/rows_per_sec_regression_pct",
+            0.0,
+            100.0,
+        )?,
+    })
+}
+
+pub(crate) fn trend_guard_thresholds(policy: &TrendGuardPolicy) -> TrendGuardThresholds {
+    TrendGuardThresholds {
+        max_connect_ms: policy.baseline_connect_ms
+            * (1.0 + policy.max_connect_regression_pct / 100.0),
+        max_first_row_ms: policy.baseline_first_row_ms
+            * (1.0 + policy.max_first_row_regression_pct / 100.0),
+        min_rows_per_sec: policy.baseline_rows_per_sec
+            * (1.0 - policy.max_rows_per_sec_regression_pct / 100.0),
+    }
+}
+
+pub(crate) fn enforce_trend_guard(
+    policy: &TrendGuardPolicy,
+    snapshot: &BenchMetricsSnapshot,
+) -> io::Result<()> {
+    let thresholds = trend_guard_thresholds(policy);
+
+    if snapshot.connect_ms > thresholds.max_connect_ms {
+        return Err(io_other(format!(
+            "trend guard `{}` failed: connect_ms {:.3} exceeded {:.3} (baseline {:.3} + {:.1}% window)",
+            policy.label,
+            snapshot.connect_ms,
+            thresholds.max_connect_ms,
+            policy.baseline_connect_ms,
+            policy.max_connect_regression_pct
+        )));
+    }
+
+    if snapshot.first_row_ms > thresholds.max_first_row_ms {
+        return Err(io_other(format!(
+            "trend guard `{}` failed: first_row_ms {:.3} exceeded {:.3} (baseline {:.3} + {:.1}% window)",
+            policy.label,
+            snapshot.first_row_ms,
+            thresholds.max_first_row_ms,
+            policy.baseline_first_row_ms,
+            policy.max_first_row_regression_pct
+        )));
+    }
+
+    if snapshot.rows_per_sec < thresholds.min_rows_per_sec {
+        return Err(io_other(format!(
+            "trend guard `{}` failed: rows_per_sec {:.3} below {:.3} (baseline {:.3} - {:.1}% window)",
+            policy.label,
+            snapshot.rows_per_sec,
+            thresholds.min_rows_per_sec,
+            policy.baseline_rows_per_sec,
+            policy.max_rows_per_sec_regression_pct
+        )));
+    }
+
+    Ok(())
+}
+
+fn required_u64(payload: &Value, pointer: &str) -> io::Result<u64> {
+    let value = required_value(payload, pointer)?;
+    value.as_u64().ok_or_else(|| {
+        io_other(format!(
+            "trend policy `{pointer}` must be an unsigned integer"
+        ))
+    })
+}
+
+fn required_string<'a>(payload: &'a Value, pointer: &str) -> io::Result<&'a str> {
+    let value = required_value(payload, pointer)?;
+    value
+        .as_str()
+        .ok_or_else(|| io_other(format!("trend policy `{pointer}` must be a string")))
+}
+
+fn required_non_negative_f64(payload: &Value, pointer: &str) -> io::Result<f64> {
+    let value = required_f64(payload, pointer)?;
+    if value < 0.0 {
+        return Err(io_other(format!(
+            "trend policy `{pointer}` must be greater than or equal to 0"
+        )));
+    }
+    Ok(value)
+}
+
+fn required_positive_f64(payload: &Value, pointer: &str) -> io::Result<f64> {
+    let value = required_f64(payload, pointer)?;
+    if value <= 0.0 {
+        return Err(io_other(format!(
+            "trend policy `{pointer}` must be greater than 0"
+        )));
+    }
+    Ok(value)
+}
+
+fn required_bounded_f64(payload: &Value, pointer: &str, min: f64, max: f64) -> io::Result<f64> {
+    let value = required_f64(payload, pointer)?;
+    if !(min..=max).contains(&value) {
+        return Err(io_other(format!(
+            "trend policy `{pointer}` must be within [{min}, {max}]"
+        )));
+    }
+    Ok(value)
+}
+
+fn required_f64(payload: &Value, pointer: &str) -> io::Result<f64> {
+    let value = required_value(payload, pointer)?;
+    let parsed = value
+        .as_f64()
+        .ok_or_else(|| io_other(format!("trend policy `{pointer}` must be a number")))?;
+    if !parsed.is_finite() {
+        return Err(io_other(format!(
+            "trend policy `{pointer}` must be a finite number"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn required_value<'a>(payload: &'a Value, pointer: &str) -> io::Result<&'a Value> {
+    payload
+        .pointer(pointer)
+        .ok_or_else(|| io_other(format!("trend policy missing required field `{pointer}`")))
 }
 
 pub(crate) fn write_metrics_file(

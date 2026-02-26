@@ -17,6 +17,7 @@ pub(crate) struct BenchmarkConfig {
     pub(crate) seed_rows: u64,
     pub(crate) assert_first_row_ms: Option<f64>,
     pub(crate) assert_min_rows_per_sec: Option<f64>,
+    pub(crate) trend_policy: Option<String>,
     pub(crate) metrics_output: Option<String>,
     pub(crate) metrics_label: Option<String>,
 }
@@ -34,6 +35,7 @@ impl Default for BenchmarkConfig {
             seed_rows: 0,
             assert_first_row_ms: None,
             assert_min_rows_per_sec: None,
+            trend_policy: None,
             metrics_output: None,
             metrics_label: None,
         }

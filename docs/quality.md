@@ -49,6 +49,9 @@ Current gate settings:
 - optional cross-platform keyring smoke check:
   - enabled when repository variable `MYR_CI_RUN_KEYRING_SMOKE=1`
   - command: `MYR_RUN_KEYRING_SMOKE=1 cargo test -p myr-adapters keyring_password_round_trip_when_enabled -- --nocapture`
+- perf smoke trend guard:
+  - policy file: `bench/perf-trend-policy.json`
+  - command flag: `--trend-policy bench/perf-trend-policy.json`
 - command:
 
 ```bash

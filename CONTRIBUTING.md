@@ -22,7 +22,7 @@ Thanks for contributing.
 
 ## CI quality gates
 
-- CI enforces formatting, clippy, tests, build, perf smoke checks, and coverage.
+- CI enforces formatting, clippy, tests, build, perf smoke checks (including trend policy guard), and coverage.
 - CI also gates adapter integration compatibility on MariaDB (`mariadb:11.4`).
 - Optional keyring smoke checks can be enabled across Linux/macOS/Windows runners with repository variable `MYR_CI_RUN_KEYRING_SMOKE=1`.
 - Coverage gate currently requires at least `85%` line coverage.

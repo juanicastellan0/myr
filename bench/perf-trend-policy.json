@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "label": "ci-perf-smoke-mysql8-seed10000-limit10000",
+  "baseline": {
+    "connect_ms": 300.0,
+    "first_row_ms": 800.0,
+    "rows_per_sec": 1000.0
+  },
+  "tolerance": {
+    "connect_ms_regression_pct": 250.0,
+    "first_row_ms_regression_pct": 400.0,
+    "rows_per_sec_regression_pct": 50.0
+  },
+  "scenario": {
+    "seed_rows": 10000,
+    "sql": "SELECT id, user_id, category, payload, created_at FROM events ORDER BY id LIMIT 10000"
+  }
+}

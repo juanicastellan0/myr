@@ -55,6 +55,9 @@ pub(crate) fn parse_args_from(
                         })?,
                 );
             }
+            "--trend-policy" => {
+                config.trend_policy = Some(next_value(&mut args, "--trend-policy")?);
+            }
             "--metrics-output" => {
                 config.metrics_output = Some(next_value(&mut args, "--metrics-output")?);
             }
@@ -82,7 +85,7 @@ fn print_help() {
     println!(
         "myr benchmark runner\n\n\
 Usage:\n  cargo run -p myr-app --bin benchmark -- [OPTIONS]\n\n\
-Options:\n  --profile-name <name>           Profile name used for connection manager (default: bench-local)\n  --host <host>                   MySQL host (default: 127.0.0.1)\n  --port <port>                   MySQL port (default: 3306)\n  --user <user>                   MySQL user (default: root)\n  --database <name>               Database name (default: myr_bench)\n  --sql <query>                   Query to benchmark\n  --seed-rows <count>             Seed `events` table up to count rows before benchmark\n  --assert-first-row-ms <ms>      Fail if first-row latency exceeds threshold\n  --assert-min-rows-per-sec <rps> Fail if throughput is below threshold\n  --metrics-output <path>         Write machine-readable benchmark JSON\n  --metrics-label <label>         Optional label stored in metrics output\n\n\
+Options:\n  --profile-name <name>           Profile name used for connection manager (default: bench-local)\n  --host <host>                   MySQL host (default: 127.0.0.1)\n  --port <port>                   MySQL port (default: 3306)\n  --user <user>                   MySQL user (default: root)\n  --database <name>               Database name (default: myr_bench)\n  --sql <query>                   Query to benchmark\n  --seed-rows <count>             Seed `events` table up to count rows before benchmark\n  --assert-first-row-ms <ms>      Fail if first-row latency exceeds threshold\n  --assert-min-rows-per-sec <rps> Fail if throughput is below threshold\n  --trend-policy <path>           Enforce trend policy from baseline/tolerance JSON\n  --metrics-output <path>         Write machine-readable benchmark JSON\n  --metrics-label <label>         Optional label stored in metrics output\n\n\
 Environment:\n  MYR_DB_PASSWORD is used for authentication.\n"
     );
 }

@@ -529,3 +529,17 @@ cargo run -p myr-app --bin benchmark -- \
   --metrics-label local-smoke \
   --metrics-output target/perf/local-smoke.json
 ```
+
+Perf trend guard check (baseline + tolerance windows):
+
+```bash
+MYR_DB_PASSWORD=root \
+cargo run -p myr-app --bin benchmark -- \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench \
+  --seed-rows 10000 \
+  --sql "SELECT id, user_id, category, payload, created_at FROM events ORDER BY id LIMIT 10000" \
+  --trend-policy bench/perf-trend-policy.json
+```
