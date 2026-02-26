@@ -1,0 +1,30 @@
++Runtime---------------------------------------------------------------------------------------+
+| APP |  | State: IDLE | DB: [x] DISCONNECTED - | Profile: not connected | Mode: - | TLS: - | D|
++----------------------------------------------------------------------------------------------+
++Panes (Tab cycles, F6 wizard, F7 manager)-----------------------------------------------------+
+| Connection Wizard  |  Schema Explorer  |  Results  |  Query Editor  |  Profiles & Bookmarks  |
++----------------------------------------------------------------------------------------------+
++Workspace----+Palette (Ctrl+P / Esc)--------------------------------------------+-------------+
+|Schema Explor|Command Palette                                                   |             |
+|Left/Right: l|Query: prev                                                       |ew | 1: previ|
+|Focus lane: T|                                                                  |             |
+|             |> Preview table                                                   |             |
+|Databases (1/|                                                                  |             |
+|* app        |Type to filter, arrows to navigate, Enter to run                  |             |
+|             |                                                                  |             |
+|Tables (4/4) |                                                                  |             |
+|> users      |                                                                  |             |
+|  sessions   |                                                                  |             |
+|  playlists  |                                                                  |             |
+|  events     |                                                                  |             |
+|             |                                                                  |             |
+|Columns (4/4)|                                                                  |             |
+|* id         |                                                                  |             |
+|  email      |                                                                  |             |
+|  created_at +------------------------------------------------------------------+             |
+|  updated_at                                                                                  |
++----------------------------------------------------------------------------------------------+
++Next Actions----------------------------------------------------------------------------------+
+|1:Preview table | 2:Build filter/sort query | 3:Jump to related table | 4:Describe table | 5:S|
+|Status: Select a field with Up/Down, press E to edit, F5 to connect                           |
++----------------------------------------------------------------------------------------------+

@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -5,6 +7,7 @@ use myr_core::actions_engine::CopyTarget;
 use myr_core::bookmarks::{FileBookmarksStore, SavedBookmark};
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore, PasswordSource, TlsMode};
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 use tempfile::TempDir;
 
@@ -64,10 +67,75 @@ fn drive_connect_to_completion(app: &mut TuiApp) {
     }
 }
 
-fn render_once(app: &TuiApp) {
-    let backend = TestBackend::new(120, 40);
+const SNAPSHOT_WIDTH: u16 = 96;
+const SNAPSHOT_HEIGHT: u16 = 30;
+const SNAPSHOT_DIR: &str = "src/tests/snapshots";
+
+fn render_snapshot(app: &TuiApp) -> String {
+    let backend = TestBackend::new(SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal.draw(|frame| render(frame, app)).expect("render");
+    snapshot_from_buffer(terminal.backend().buffer())
+}
+
+fn snapshot_from_buffer(buffer: &Buffer) -> String {
+    let mut lines = Vec::with_capacity(usize::from(buffer.area.height));
+    for y in 0..buffer.area.height {
+        let mut line = String::with_capacity(usize::from(buffer.area.width));
+        for x in 0..buffer.area.width {
+            let cell = buffer
+                .cell((x, y))
+                .expect("snapshot coordinates should stay inside the buffer");
+            line.push_str(normalize_snapshot_symbol(cell.symbol()));
+        }
+        lines.push(line.trim_end_matches(' ').to_string());
+    }
+
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+
+    let mut snapshot = lines.join("\n");
+    snapshot.push('\n');
+    snapshot
+}
+
+fn normalize_snapshot_symbol(symbol: &str) -> &str {
+    match symbol {
+        "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼" => "+",
+        "─" | "━" => "-",
+        "│" | "┃" => "|",
+        _ => symbol,
+    }
+}
+
+fn snapshot_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(SNAPSHOT_DIR)
+        .join(format!("{name}.snap"))
+}
+
+fn bless_render_snapshots_enabled() -> bool {
+    matches!(
+        std::env::var("MYR_BLESS_RENDER_SNAPSHOTS").as_deref(),
+        Ok("1")
+    )
+}
+
+fn assert_render_snapshot(name: &str, app: &TuiApp) {
+    let path = snapshot_path(name);
+    let actual = render_snapshot(app);
+
+    if bless_render_snapshots_enabled() {
+        let parent = path.parent().expect("snapshot path should have a parent");
+        fs::create_dir_all(parent).expect("failed to create snapshot directory");
+        fs::write(&path, actual).expect("failed to write snapshot");
+        return;
+    }
+
+    let expected = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read snapshot {}: {error}", path.display()));
+    assert_eq!(actual, expected, "snapshot mismatch: {}", path.display());
 }
 
 fn drive_query_worker_to_completion(app: &mut TuiApp) {
@@ -1358,18 +1426,20 @@ fn palette_supports_fuzzy_and_alias_queries() {
 }
 
 #[test]
-fn rendering_covers_all_panes_and_popups() {
-    let mut wizard = app_in_pane(Pane::ConnectionWizard);
-    wizard.show_help = true;
-    render_once(&wizard);
+fn rendering_snapshots_cover_key_panes() {
+    let wizard = app_in_pane(Pane::ConnectionWizard);
+    assert_render_snapshot("pane_connection_wizard", &wizard);
 
     let mut schema = app_in_pane(Pane::SchemaExplorer);
-    schema.show_palette = true;
-    schema.palette_query = "prev".to_string();
-    render_once(&schema);
+    schema.schema_lane = SchemaLane::Columns;
+    schema.schema_column_view_mode = SchemaColumnViewMode::Full;
+    schema.schema_column_filter = "id".to_string();
+    schema.selected_column_index = 1;
+    assert_render_snapshot("pane_schema_explorer", &schema);
 
     let mut results = app_in_pane(Pane::Results);
     results.populate_demo_results();
+    results.results_cursor = 5;
     results.pagination_state = Some(super::PaginationState {
         database: Some("app".to_string()),
         table: "users".to_string(),
@@ -1378,26 +1448,89 @@ fn rendering_covers_all_panes_and_popups() {
         last_page_row_count: 200,
         plan: PaginationPlan::Offset,
     });
-    render_once(&results);
+    assert_render_snapshot("pane_results", &results);
 
-    let editor = app_in_pane(Pane::QueryEditor);
-    render_once(&editor);
+    let mut editor = app_in_pane(Pane::QueryEditor);
+    editor.query_editor_text =
+        "SELECT id, value\nFROM `users`\nWHERE id > 10\nORDER BY id DESC\nLIMIT 25".to_string();
+    editor.query_cursor = editor.query_editor_text.len();
+    editor.query_history = vec![
+        "SELECT * FROM `users` LIMIT 10".to_string(),
+        "SELECT id FROM `events` LIMIT 25".to_string(),
+    ];
+    editor.query_history_index = Some(1);
+    assert_render_snapshot("pane_query_editor", &editor);
 
-    let manager = app_in_pane(Pane::ProfileBookmarks);
-    render_once(&manager);
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let mut manager = app_with_manager_stores(Pane::ProfileBookmarks, &temp_dir);
+    let mut local = ConnectionProfile::new("local-dev", "127.0.0.1", "root");
+    local.database = Some("app".to_string());
+    local.is_default = true;
+    let mut analytics = ConnectionProfile::new("analytics-ro", "10.2.0.5", "readonly");
+    analytics.database = Some("warehouse".to_string());
+    analytics.read_only = true;
+    analytics.quick_reconnect = true;
+    {
+        let store = manager.profile_store.as_mut().expect("profile store");
+        store.upsert_profile(local);
+        store.upsert_profile(analytics);
+    }
 
-    let mut exit_confirm = app_in_pane(Pane::Results);
-    exit_confirm.exit_confirmation = true;
-    render_once(&exit_confirm);
+    let mut users = SavedBookmark::new("users-preview");
+    users.profile_name = Some("local-dev".to_string());
+    users.database = Some("app".to_string());
+    users.table = Some("users".to_string());
+    users.column = Some("id".to_string());
+    users.query = Some("SELECT id, email FROM `app`.`users` LIMIT 25".to_string());
+
+    let mut events = SavedBookmark::new("events-latest");
+    events.profile_name = Some("analytics-ro".to_string());
+    events.database = Some("warehouse".to_string());
+    events.table = Some("events".to_string());
+    events.column = Some("observed_at".to_string());
+    events.query = Some(
+        "SELECT observed_at, value FROM `warehouse`.`events` ORDER BY observed_at DESC LIMIT 20"
+            .to_string(),
+    );
+    {
+        let store = manager.bookmark_store.as_mut().expect("bookmark store");
+        store.upsert_bookmark(users);
+        store.upsert_bookmark(events);
+    }
+
+    manager.manager_lane = ManagerLane::Bookmarks;
+    manager.manager_bookmark_cursor = 1;
+    manager.manager_rename_mode = true;
+    manager.manager_rename_buffer = "events-rolling".to_string();
+    assert_render_snapshot("pane_profile_bookmark_manager", &manager);
+}
+
+#[test]
+fn rendering_snapshots_cover_key_popups() {
+    let mut palette = app_in_pane(Pane::SchemaExplorer);
+    palette.show_palette = true;
+    palette.palette_query = "prev".to_string();
+    assert_render_snapshot("popup_palette", &palette);
+
+    let mut help = app_in_pane(Pane::ConnectionWizard);
+    help.show_help = true;
+    assert_render_snapshot("popup_help", &help);
+
+    let mut exit_confirmation = app_in_pane(Pane::Results);
+    exit_confirmation.exit_confirmation = true;
+    exit_confirmation.status_line = "No active query. Exit myr?".to_string();
+    assert_render_snapshot("popup_exit_confirmation", &exit_confirmation);
 
     let mut error_popup = app_in_pane(Pane::Results);
+    error_popup.last_failed_query = Some("SELECT * FROM `users` LIMIT 20".to_string());
+    error_popup.last_connect_profile = Some(ConnectionProfile::new("qa", "127.0.0.1", "root"));
     error_popup.open_error_panel(
-        ErrorKind::Connection,
-        "Connection Error",
-        "connect failed".to_string(),
-        "connection refused".to_string(),
+        ErrorKind::Query,
+        "Query Error",
+        "Query execution failed".to_string(),
+        "connection reset by peer".to_string(),
     );
-    render_once(&error_popup);
+    assert_render_snapshot("popup_error_panel", &error_popup);
 }
 
 #[test]

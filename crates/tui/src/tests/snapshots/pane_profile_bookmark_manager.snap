@@ -1,0 +1,30 @@
++Runtime---------------------------------------------------------------------------------------+
+| APP |  | State: IDLE | DB: [x] DISCONNECTED - | Profile: not connected | Mode: - | TLS: - | D|
++----------------------------------------------------------------------------------------------+
++Panes (Tab cycles, F6 wizard, F7 manager)-----------------------------------------------------+
+| Connection Wizard  |  Schema Explorer  |  Results  |  Query Editor  |  Profiles & Bookmarks  |
++----------------------------------------------------------------------------------------------+
++Workspace-------------------------------------------------------------------------------------+
+|Profiles & Bookmarks                                                                          |
+|Left/Right: lane focus | Up/Down: selection | Enter: open/save | Del: delete                  |
+|Shortcuts: r rename | d default profile | q quick reconnect | F5 connect                      |
+|Focus lane: Bookmarks | Profiles: 2 | Bookmarks: 2                                            |
+|                                                                                              |
+|Profiles                                                                                      |
+|* analytics-ro [quick] | readonly@10.2.0.5:3306 | db warehouse | RO                           |
+|  local-dev [default] | root@127.0.0.1:3306 | db app | RW                                     |
+|                                                                                              |
+|Bookmarks                                                                                     |
+|  events-latest | warehouse.events (observed_at)                                              |
+|> users-preview | app.users (id)                                                              |
+|                                                                                              |
+|Selected Entry                                                                                |
+|  Name: users-preview                                                                         |
+|  Target: app.users (id)                                                                      |
+|  Query: SELECT id, email FROM `app`.`users` LIMIT 25                                         |
+|                                                                                              |
++----------------------------------------------------------------------------------------------+
++Next Actions----------------------------------------------------------------------------------+
+|F5: connect | Enter: open/save | Del: delete | r:rename d:default q:quick | F6/F7             |
+|Status: Select a field with Up/Down, press E to edit, F5 to connect                           |
++----------------------------------------------------------------------------------------------+

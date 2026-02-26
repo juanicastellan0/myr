@@ -1,0 +1,30 @@
++Runtime---------------------------------------------------------------------------------------+
+| APP |  | State: IDLE | DB: [x] DISCONNECTED - | Profile: not connected | Mode: - | TLS: - | D|
++----------------------------------------------------------------------------------------------+
++Panes (Tab cycles, F6 wizard, F7 manager)-----------------------------------------------------+
+| Connection Wizard  |  Schema Explorer  |  Results  |  Query Editor  |  Profiles & Bookmarks  |
++----------------------------------------------------------------------------------------------+
++Workspace-------------------------------------------------------------------------------------+
+|Results View (virtualized)                                                                    |
+|Use Up/Down for rows and Left/Right for columns (hjkl also works).                            |
+|Press 7 to search buffered rows.                                                              |
+|Page 2 | Strategy: offset fallback | Page size 200                                            |
+|                                                                                              |
+|Columns 1-3 / 3 | Active col 2: value                                                         |
+|      id  | [value]        | observed_at                                                      |
+|      ----------------------------------                                                      |
+| 0001 1   | [users-val...] | 2026-02-01                                                       |
+| 0002 2   | [users-val...] | 2026-02-02                                                       |
+| 0003 3   | [users-val...] | 2026-02-03                                                       |
+| 0004 4   | [users-val...] | 2026-02-04                                                       |
+| 0005 5   | [users-val...] | 2026-02-05                                                       |
+|>0006 6   | [users-val...] | 2026-02-06                                                       |
+| 0007 7   | [users-val...] | 2026-02-07                                                       |
+| 0008 8   | [users-val...] | 2026-02-08                                                       |
+| 0009 9   | [users-val...] | 2026-02-09                                                       |
+| 0010 10  | [users-val...] | 2026-02-10                                                       |
++----------------------------------------------------------------------------------------------+
++Next Actions----------------------------------------------------------------------------------+
+|1:Build filter/sort query | 2:Next page | 3:Previous page | 4:Estimate row count | 5:Export CS|
+|Status: Select a field with Up/Down, press E to edit, F5 to connect                           |
++----------------------------------------------------------------------------------------------+

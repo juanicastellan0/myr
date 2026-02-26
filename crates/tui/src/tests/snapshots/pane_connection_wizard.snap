@@ -1,0 +1,30 @@
++Runtime---------------------------------------------------------------------------------------+
+| APP |  | State: IDLE | DB: [x] DISCONNECTED - | Profile: not connected | Mode: - | TLS: - | D|
++----------------------------------------------------------------------------------------------+
++Panes (Tab cycles, F6 wizard, F7 manager)-----------------------------------------------------+
+| Connection Wizard  |  Schema Explorer  |  Results  |  Query Editor  |  Profiles & Bookmarks  |
++----------------------------------------------------------------------------------------------+
++Workspace-------------------------------------------------------------------------------------+
+|Connection Wizard                                                                             |
+|Up/Down: select field                                                                         |
+|E or Enter: edit field | Enter: save field                                                    |
+|Esc: cancel edit | Ctrl+U: clear field | F5: connect                                          |
+|                                                                                              |
+|> Profile: local-dev                                                                          |
+|  Host: 127.0.0.1                                                                             |
+|  Port: 3306                                                                                  |
+|  User: root                                                                                  |
+|  Password source (env/keyring): env                                                          |
+|  Database: app                                                                               |
+|  TLS mode (disabled/prefer/require/verify_identity): prefer                                  |
+|  Read-only (yes/no): no                                                                      |
+|                                                                                              |
+|                                                                                              |
+|                                                                                              |
+|                                                                                              |
+|                                                                                              |
++----------------------------------------------------------------------------------------------+
++Next Actions----------------------------------------------------------------------------------+
+|F5: connect | E/Enter: edit | Enter: save edit | Esc: cancel edit | F10: quit                 |
+|Status: Select a field with Up/Down, press E to edit, F5 to connect                           |
++----------------------------------------------------------------------------------------------+

@@ -1,0 +1,30 @@
++Runtime---------------------------------------------------------------------------------------+
+| APP |  | State: IDLE | DB: [x] DISCONNECTED - | Profile: not connected | Mode: - | TLS: - | D|
++----------------------------------------------------------------------------------------------+
++Panes (Tab cycles, F6 wizard, F7 manager)-----------------------------------------------------+
+| Connection Wizard  |  Schema Explorer  |  Results  |  Query Editor  |  Profiles & Bookmarks  |
++----------------------------------------------------------------------------------------------+
++Workspace-------------------------------------------------------------------------------------+
+|Query Editor                                                                                  |
+|SQL block is editable; metadata below is read-only.                                           |
+|Enter: run query | Ctrl+Enter: newline | Left/Right: cursor | Up/Down: history                |
+|                                                                                              |
+|SQL (active region):                                                                          |
+|  | ....+....|....+....|....+....|....+....|....+....|....+....|....+....|....+....|....+....||
+|1 | SELECT id, value                                                                          |
+|2 | FROM `users`                                                                              |
+|3 | WHERE id > 10                                                                             |
+|4 | ORDER BY id DESC                                                                          |
+|5 | LIMIT 25|                                                                                 |
+|---- End SQL ----                                                                             |
+|                                                                                              |
+|Metadata (read-only):                                                                         |
+|Cursor: line 5, col 9 | history 2 / 2                                                         |
+|SQL lines: 5 | cursor offset 69 bytes                                                         |
+|                                                                                              |
+|                                                                                              |
++----------------------------------------------------------------------------------------------+
++Next Actions----------------------------------------------------------------------------------+
+|1:Explain query | 2:Build filter/sort query | 3:Run query | 4:Insert SELECT snippet | 5:Insert|
+|Status: Select a field with Up/Down, press E to edit, F5 to connect                           |
++----------------------------------------------------------------------------------------------+
