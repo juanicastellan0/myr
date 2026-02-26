@@ -72,6 +72,10 @@ pub struct QueryExecutionSummary {
 
 #[async_trait]
 pub trait QueryRowStream: Send {
+    fn column_names(&self) -> Option<&[String]> {
+        None
+    }
+
     async fn next_row(&mut self) -> Result<Option<QueryRow>, QueryBackendError>;
 
     async fn cancel(&mut self) -> Result<(), QueryBackendError> {

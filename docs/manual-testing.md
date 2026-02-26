@@ -474,6 +474,83 @@ Steps and expected behavior:
 4. Press `F10` from any pane:
    - Immediate exit.
 
+## Non-Interactive CLI Entry Points
+
+Prerequisite: keep `MYR_DB_PASSWORD` exported and local seed DB running (`scripts/dev-db-seed.sh`).
+
+### Query (`myr-app query`)
+
+Steps:
+
+1. Run:
+
+```bash
+MYR_DB_PASSWORD=root \
+cargo run -p myr-app -- \
+  query \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench \
+  --sql "SELECT id, email FROM \`myr_bench\`.\`users\` ORDER BY id LIMIT 2"
+```
+
+Expected:
+
+- `stdout` prints one JSON object per row.
+- Process exits with code `0`.
+
+### Export (`myr-app export`)
+
+Steps:
+
+1. Run:
+
+```bash
+MYR_DB_PASSWORD=root \
+cargo run -p myr-app -- \
+  export \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench \
+  --sql "SELECT id, category, payload FROM \`myr_bench\`.\`events\` ORDER BY id LIMIT 50" \
+  --format csv.gz \
+  --output /tmp/myr-cli-export.csv.gz
+```
+
+2. Verify generated file:
+
+```bash
+gzip -dc /tmp/myr-cli-export.csv.gz | head -n 3
+```
+
+Expected:
+
+- Command reports `export.rows_written=50` (or matching selected row count).
+- Decompressed output includes a CSV header row and query data rows.
+
+### Doctor (`myr-app doctor`)
+
+Steps:
+
+1. Run:
+
+```bash
+MYR_DB_PASSWORD=root \
+cargo run -p myr-app -- \
+  doctor \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench
+```
+
+Expected:
+
+- Output reports `doctor.connection=ok`, `doctor.schema=ok`, `doctor.query_smoke=ok`.
+- Command exits with code `0`.
+
 ## Optional Real-DB Automated Checks
 
 Adapter integration:

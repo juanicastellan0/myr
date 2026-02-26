@@ -22,6 +22,7 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 2. Run `cargo build` from the repository root.
 3. Run `cargo test` to verify baseline health.
 4. Start the app with `cargo run -p myr-app`.
+5. View non-interactive CLI help with `cargo run -p myr-app -- --help`.
 
 ## Install Channels
 
@@ -69,6 +70,10 @@ Notes:
   - Keyset pagination for detected `id` / `*_id` keys
   - OFFSET fallback when keyset is unavailable
 - Export to streaming CSV/JSON plus JSONL and gzip variants
+- Non-interactive scripting entrypoints:
+  - `myr-app query --sql ...`
+  - `myr-app export --sql ... --format ... --output ...`
+  - `myr-app doctor`
 - Benchmark runner + CI perf smoke checks with persisted perf metric artifacts and trend-policy guardrails
 
 ## Visual Status Cues
@@ -100,6 +105,45 @@ Notes:
   - `bench/scripts/run_benchmark.sh`
 - One-command local connection test dataset:
   - `scripts/dev-db-seed.sh`
+
+## Non-Interactive CLI
+
+Query rows as JSON Lines (`stdout`):
+
+```bash
+MYR_DB_PASSWORD=root cargo run -p myr-app -- \
+  query \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench \
+  --sql "SELECT id, email FROM \`myr_bench\`.\`users\` ORDER BY id LIMIT 3"
+```
+
+Export query results:
+
+```bash
+MYR_DB_PASSWORD=root cargo run -p myr-app -- \
+  export \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench \
+  --sql "SELECT id, category, payload FROM \`myr_bench\`.\`events\` ORDER BY id LIMIT 200" \
+  --format jsonl.gz \
+  --output /tmp/events.jsonl.gz
+```
+
+Run diagnostics (`connection + schema + query smoke`):
+
+```bash
+MYR_DB_PASSWORD=root cargo run -p myr-app -- \
+  doctor \
+  --host 127.0.0.1 \
+  --port 33306 \
+  --user root \
+  --database myr_bench
+```
 
 ## Manual Testing
 

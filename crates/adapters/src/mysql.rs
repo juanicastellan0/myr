@@ -153,19 +153,30 @@ impl SchemaBackend for MysqlDataBackend {
 pub struct MysqlStreamingRowStream {
     stream: Option<ResultSetStream<'static, 'static, 'static, Row, TextProtocol>>,
     cancelled: bool,
+    column_names: Vec<String>,
 }
 
 impl MysqlStreamingRowStream {
     fn new(stream: ResultSetStream<'static, 'static, 'static, Row, TextProtocol>) -> Self {
+        let column_names = stream
+            .columns_ref()
+            .iter()
+            .map(|column| column.name_str().into_owned())
+            .collect();
         Self {
             stream: Some(stream),
             cancelled: false,
+            column_names,
         }
     }
 }
 
 #[async_trait]
 impl QueryRowStream for MysqlStreamingRowStream {
+    fn column_names(&self) -> Option<&[String]> {
+        Some(&self.column_names)
+    }
+
     async fn next_row(&mut self) -> Result<Option<QueryRow>, QueryBackendError> {
         if self.cancelled {
             return Ok(None);

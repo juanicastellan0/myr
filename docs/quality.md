@@ -81,6 +81,14 @@ MYR_DB_PASSWORD=root MYR_RUN_TUI_MYSQL_INTEGRATION=1 \
 
 MYR_RUN_KEYRING_SMOKE=1 \
   cargo test -p myr-adapters keyring_password_round_trip_when_enabled -- --nocapture
+
+# Non-interactive CLI smoke checks.
+MYR_DB_PASSWORD=root cargo run -p myr-app -- \
+  query --host 127.0.0.1 --port 33306 --user root --database myr_bench \
+  --sql "SELECT 1 AS health_check"
+
+MYR_DB_PASSWORD=root cargo run -p myr-app -- \
+  doctor --host 127.0.0.1 --port 33306 --user root --database myr_bench
 ```
 
 Runtime behavior knobs (optional):

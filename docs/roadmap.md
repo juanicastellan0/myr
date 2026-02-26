@@ -99,7 +99,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 
 - [x] Build and publish arm64 artifacts (`linux-aarch64`, `macos-aarch64`).
 - [x] Add install channels (Homebrew tap and Scoop manifest).
-- [ ] Add non-interactive CLI entrypoints for scripting:
+- [x] Add non-interactive CLI entrypoints for scripting:
   - `myr-app query --sql ...`
   - `myr-app export --format ...`
   - `myr-app doctor`
