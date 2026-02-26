@@ -33,7 +33,9 @@ git push origin v0.1.0
 - Builds `myr-app` in release mode with `--locked`.
 - Produces archives for:
   - `linux-x86_64`
+  - `linux-aarch64`
   - `macos-x86_64`
+  - `macos-aarch64`
   - `windows-x86_64`
 - Packages each archive with:
   - `myr-app` / `myr-app.exe` (Windows)

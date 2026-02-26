@@ -62,7 +62,7 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
   build-artifacts:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.platform }})
     needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
@@ -72,27 +72,41 @@ jobs:
           - os: ubuntu-latest
             platform: linux-x86_64
             archive_ext: tar.gz
+            rust_target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+            archive_ext: tar.gz
+            rust_target: aarch64-unknown-linux-gnu
           - os: macos-13
             platform: macos-x86_64
             archive_ext: tar.gz
+            rust_target: x86_64-apple-darwin
+          - os: macos-14
+            platform: macos-aarch64
+            archive_ext: tar.gz
+            rust_target: aarch64-apple-darwin
           - os: windows-latest
             platform: windows-x86_64
             archive_ext: zip
+            rust_target: x86_64-pc-windows-msvc
     env:
       ARCHIVE_ROOT: ${{ env.BIN_NAME }}-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}
       ARCHIVE_NAME: ${{ env.BIN_NAME }}-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+      BUILD_DIR: target/${{ matrix.rust_target }}/release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --locked --release -p myr-app --bin myr-app
+        run: cargo build --locked --release -p myr-app --bin myr-app --target ${{ matrix.rust_target }}
 
       - name: Package artifact (Unix)
         if: runner.os != 'Windows'
@@ -100,7 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "dist/${ARCHIVE_ROOT}"
-          cp "target/release/${BIN_NAME}" "dist/${ARCHIVE_ROOT}/${BIN_NAME}"
+          cp "${BUILD_DIR}/${BIN_NAME}" "dist/${ARCHIVE_ROOT}/${BIN_NAME}"
           cp README.md LICENSE "dist/${ARCHIVE_ROOT}/"
           tar -czf "${ARCHIVE_NAME}" -C dist "${ARCHIVE_ROOT}"
 
@@ -110,7 +124,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path "dist/$env:ARCHIVE_ROOT" | Out-Null
-          Copy-Item "target/release/$env:BIN_NAME.exe" "dist/$env:ARCHIVE_ROOT/$env:BIN_NAME.exe"
+          Copy-Item "$env:BUILD_DIR/$env:BIN_NAME.exe" "dist/$env:ARCHIVE_ROOT/$env:BIN_NAME.exe"
           Copy-Item "README.md","LICENSE" "dist/$env:ARCHIVE_ROOT/"
           Compress-Archive -Path "dist/$env:ARCHIVE_ROOT/*" -DestinationPath "$env:ARCHIVE_NAME" -Force
 

@@ -97,7 +97,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 
 ## M13: Distribution and Adoption
 
-- [ ] Build and publish arm64 artifacts (`linux-aarch64`, `macos-aarch64`).
+- [x] Build and publish arm64 artifacts (`linux-aarch64`, `macos-aarch64`).
 - [ ] Add install channels (Homebrew tap and Scoop manifest).
 - [ ] Add non-interactive CLI entrypoints for scripting:
   - `myr-app query --sql ...`
