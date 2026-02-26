@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+const PROFILES_FORMAT_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
@@ -124,11 +126,20 @@ pub enum ProfilesError {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProfilesDocument {
+    #[serde(default = "profiles_format_version")]
+    version: u32,
     #[serde(default)]
     profiles: Vec<ConnectionProfile>,
 }
 
 impl ProfilesDocument {
+    fn new(profiles: Vec<ConnectionProfile>) -> Self {
+        Self {
+            version: PROFILES_FORMAT_VERSION,
+            profiles,
+        }
+    }
+
     fn normalize(&mut self) {
         let mut by_name = std::collections::BTreeMap::new();
         for profile in self.profiles.drain(..) {
@@ -136,6 +147,74 @@ impl ProfilesDocument {
         }
         self.profiles = by_name.into_values().collect();
     }
+}
+
+fn profiles_format_version() -> u32 {
+    PROFILES_FORMAT_VERSION
+}
+
+fn decode_profiles_document(raw: &str) -> Result<(ProfilesDocument, bool), toml::de::Error> {
+    let mut value: toml::Value = toml::from_str(raw)?;
+    let migrated = migrate_profiles_document(&mut value);
+    let doc: ProfilesDocument = value.try_into()?;
+    Ok((doc, migrated))
+}
+
+fn migrate_profiles_document(value: &mut toml::Value) -> bool {
+    let Some(root) = value.as_table_mut() else {
+        return false;
+    };
+
+    let version = root
+        .get("version")
+        .map_or(0, |value| match value.as_integer() {
+            Some(raw) => u32::try_from(raw).unwrap_or(PROFILES_FORMAT_VERSION.saturating_add(1)),
+            None => PROFILES_FORMAT_VERSION.saturating_add(1),
+        });
+
+    if version != 0 {
+        return false;
+    }
+
+    let _ = rename_table_key(root, "connections", "profiles");
+
+    if let Some(profiles) = root.get_mut("profiles").and_then(toml::Value::as_array_mut) {
+        for profile in profiles {
+            if let Some(profile_table) = profile.as_table_mut() {
+                let _ = migrate_profile_fields(profile_table);
+            }
+        }
+    }
+
+    root.insert(
+        "version".to_string(),
+        toml::Value::Integer(PROFILES_FORMAT_VERSION.into()),
+    );
+    true
+}
+
+fn migrate_profile_fields(profile: &mut toml::map::Map<String, toml::Value>) -> bool {
+    let mut migrated = false;
+    migrated |= rename_table_key(profile, "default", "is_default");
+    migrated |= rename_table_key(profile, "quick", "quick_reconnect");
+    migrated |= rename_table_key(profile, "quick_connect", "quick_reconnect");
+    migrated |= rename_table_key(profile, "password_provider", "password_source");
+    migrated |= rename_table_key(profile, "tls_ca_cert", "tls_ca_cert_path");
+    migrated |= rename_table_key(profile, "tls_client_cert", "tls_client_cert_path");
+    migrated |= rename_table_key(profile, "tls_client_key", "tls_client_key_path");
+    migrated |= rename_table_key(profile, "read_only_mode", "read_only");
+    migrated
+}
+
+fn rename_table_key(table: &mut toml::map::Map<String, toml::Value>, from: &str, to: &str) -> bool {
+    let Some(value) = table.remove(from) else {
+        return false;
+    };
+
+    if !table.contains_key(to) {
+        table.insert(to.to_string(), value);
+    }
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -171,17 +250,23 @@ impl FileProfilesStore {
             });
         }
 
-        let mut doc: ProfilesDocument =
-            toml::from_str(&raw).map_err(|source| ProfilesError::Parse {
+        let (mut doc, migrated) =
+            decode_profiles_document(&raw).map_err(|source| ProfilesError::Parse {
                 path: path.clone(),
                 source,
             })?;
         doc.normalize();
 
-        Ok(Self {
+        let store = Self {
             path,
             profiles: doc.profiles,
-        })
+        };
+
+        if migrated {
+            store.persist()?;
+        }
+
+        Ok(store)
     }
 
     #[must_use]
@@ -261,9 +346,7 @@ impl FileProfilesStore {
             })?;
         }
 
-        let doc = ProfilesDocument {
-            profiles: self.profiles.clone(),
-        };
+        let doc = ProfilesDocument::new(self.profiles.clone());
         let rendered =
             toml::to_string_pretty(&doc).map_err(|source| ProfilesError::Serialize { source })?;
 
@@ -293,11 +376,12 @@ pub fn default_profiles_path() -> Result<PathBuf, ProfilesError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use tempfile::TempDir;
 
-    use super::{ConnectionProfile, FileProfilesStore, TlsMode};
+    use super::{ConnectionProfile, FileProfilesStore, PasswordSource, TlsMode};
 
     fn temp_profiles_path(temp_dir: &TempDir) -> PathBuf {
         temp_dir.path().join("profiles.toml")
@@ -396,5 +480,93 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn persist_writes_profiles_format_version() {
+        let temp_dir = TempDir::new().expect("failed to create temp directory");
+        let path = temp_profiles_path(&temp_dir);
+        let mut store = FileProfilesStore::load_from_path(&path).expect("failed to load store");
+        store.upsert_profile(ConnectionProfile::new("local", "127.0.0.1", "root"));
+        store.persist().expect("failed to persist store");
+
+        let raw = fs::read_to_string(path).expect("failed to read persisted profile file");
+        assert!(raw.contains("version = 1"));
+    }
+
+    #[test]
+    fn load_migrates_legacy_profile_document_and_rewrites_file() {
+        let temp_dir = TempDir::new().expect("failed to create temp directory");
+        let path = temp_profiles_path(&temp_dir);
+        let legacy = r#"
+[[connections]]
+name = "legacy"
+host = "127.0.0.1"
+port = 3307
+user = "root"
+default = true
+quick_connect = true
+password_provider = "keyring"
+tls_ca_cert = "/tmp/ca.pem"
+tls_client_cert = "/tmp/client-cert.pem"
+tls_client_key = "/tmp/client-key.pem"
+read_only_mode = true
+"#;
+        fs::write(&path, legacy).expect("failed to write legacy profile file");
+
+        let store = FileProfilesStore::load_from_path(&path).expect("failed to load legacy file");
+        let profile = store
+            .profile("legacy")
+            .expect("legacy profile should be migrated");
+        assert!(profile.is_default);
+        assert!(profile.quick_reconnect);
+        assert!(profile.read_only);
+        assert_eq!(profile.password_source, PasswordSource::Keyring);
+        assert_eq!(profile.tls_ca_cert_path.as_deref(), Some("/tmp/ca.pem"));
+        assert_eq!(
+            profile.tls_client_cert_path.as_deref(),
+            Some("/tmp/client-cert.pem")
+        );
+        assert_eq!(
+            profile.tls_client_key_path.as_deref(),
+            Some("/tmp/client-key.pem")
+        );
+
+        let migrated = fs::read_to_string(path).expect("failed to read migrated profile file");
+        assert!(migrated.contains("version = 1"));
+        assert!(migrated.contains("[[profiles]]"));
+        assert!(migrated.contains("is_default = true"));
+        assert!(migrated.contains("quick_reconnect = true"));
+        assert!(!migrated.contains("[[connections]]"));
+        assert!(!migrated.contains("\nquick_connect = "));
+        assert!(!migrated.contains("\npassword_provider = "));
+        assert!(!migrated.contains("\nread_only_mode = "));
+    }
+
+    #[test]
+    fn load_accepts_future_profile_version_without_overwriting_file() {
+        let temp_dir = TempDir::new().expect("failed to create temp directory");
+        let path = temp_profiles_path(&temp_dir);
+        let future = r#"
+version = 9
+
+[[profiles]]
+name = "future"
+host = "127.0.0.1"
+port = 3306
+user = "root"
+future_flag = "enabled"
+"#;
+        fs::write(&path, future).expect("failed to write future profile file");
+
+        let store = FileProfilesStore::load_from_path(&path).expect("failed to load future file");
+        let profile = store
+            .profile("future")
+            .expect("future profile should still load");
+        assert_eq!(profile.host, "127.0.0.1");
+
+        let untouched = fs::read_to_string(path).expect("failed to read future profile file");
+        assert!(untouched.contains("version = 9"));
+        assert!(untouched.contains("future_flag = \"enabled\""));
     }
 }

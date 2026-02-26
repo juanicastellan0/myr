@@ -82,6 +82,23 @@ Expected:
 - TLS profile options are accepted and used by the adapter.
 - Strict verification should reject invalid/untrusted cert chains.
 
+## Profile Config Migration
+
+Steps:
+
+1. Exit the app.
+2. Edit `~/.config/myr/profiles.toml` (or `$MYR_CONFIG_DIR/myr/profiles.toml`) to a legacy shape:
+   - use `[[connections]]` instead of `[[profiles]]`
+   - use legacy keys like `quick_connect`, `password_provider`, and `tls_ca_cert`
+3. Start the app (`cargo run -p myr-app`) and open Connection Wizard/manager once.
+4. Exit and reopen the profile file.
+
+Expected:
+
+- Legacy profile still loads in the app.
+- File is rewritten to canonical format with `version = 1`.
+- Legacy keys are replaced with canonical keys (`quick_reconnect`, `password_source`, `tls_ca_cert_path`).
+
 ## Pane Navigation and Animation
 
 Steps:

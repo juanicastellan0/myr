@@ -47,6 +47,7 @@ Notes:
 ## Key Features
 
 - Connection wizard with persisted profiles
+- Versioned profile config with automatic legacy-key migration on load
 - Schema explorer lanes for databases, tables, and columns
 - Schema Explorer filter-as-you-type plus compact/full column metadata toggle (`F4`)
 - Runtime status strip with animated app heartbeat + DB state (`[x]` disconnected, `[~]` connecting, `[+]` connected)
@@ -88,6 +89,7 @@ Notes:
   - `password_source = keyring` (reads keyring first, falls back to env and stores on success)
 - Schema/table loading and query execution use the live adapter when connected.
 - TLS options are profile-driven (`tls_mode`, optional CA/client cert/client key, verification toggles).
+- Profile config upgrades are migration-backed (`version = 1` is auto-written for legacy files).
 - Table preview now supports paging actions: keyset pagination on detected `id`/`*_id` columns with OFFSET fallback.
 - Query executions append audit entries to `~/.config/myr/audit.ndjson` (or `$MYR_CONFIG_DIR/myr/audit.ndjson`).
 - Audit retention defaults:

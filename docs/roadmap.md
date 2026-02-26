@@ -103,7 +103,7 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
   - `myr-app query --sql ...`
   - `myr-app export --format ...`
   - `myr-app doctor`
-- [ ] Add config/profile migration helper for forward-compatible upgrades.
+- [x] Add config/profile migration helper for forward-compatible upgrades.
 
 ## Next Up (Proposed Execution Order)
 
