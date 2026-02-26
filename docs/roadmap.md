@@ -108,5 +108,3 @@ All M0-M8 milestones are complete (bootstrap, explorer, guided actions, paginati
 ## Next Up (Proposed Execution Order)
 
 - [x] Add architecture notes in `docs/architecture.md`.
-- [ ] Split TUI `navigation` into pane-level movement, schema traversal, and manager interactions.
-- [ ] Move TUI state/data model types out of `crates/tui/src/lib.rs` into dedicated modules.
