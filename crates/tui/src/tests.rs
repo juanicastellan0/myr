@@ -109,6 +109,10 @@ fn normalize_snapshot_symbol(symbol: &str) -> &str {
     }
 }
 
+fn normalize_snapshot_newlines(snapshot: &str) -> String {
+    snapshot.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn snapshot_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join(SNAPSHOT_DIR)
@@ -135,6 +139,7 @@ fn assert_render_snapshot(name: &str, app: &TuiApp) {
 
     let expected = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read snapshot {}: {error}", path.display()));
+    let expected = normalize_snapshot_newlines(&expected);
     assert_eq!(actual, expected, "snapshot mismatch: {}", path.display());
 }
 
@@ -169,6 +174,22 @@ fn mysql_integration_profile(database: Option<&str>) -> ConnectionProfile {
     profile.port = port;
     profile.database = database.map(str::to_string);
     profile
+}
+
+#[test]
+fn snapshot_newline_normalization_is_cross_platform() {
+    assert_eq!(
+        normalize_snapshot_newlines("first\nsecond\n"),
+        "first\nsecond\n"
+    );
+    assert_eq!(
+        normalize_snapshot_newlines("first\r\nsecond\r\n"),
+        "first\nsecond\n"
+    );
+    assert_eq!(
+        normalize_snapshot_newlines("first\rsecond\r"),
+        "first\nsecond\n"
+    );
 }
 
 #[test]
