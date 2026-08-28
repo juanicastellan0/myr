@@ -63,6 +63,13 @@ impl<B: SchemaBackend> SchemaCacheService<B> {
         }
     }
 
+    pub fn prime_databases(&mut self, databases: Vec<String>) {
+        self.databases = Some(Cached {
+            fetched_at: Instant::now(),
+            value: databases,
+        });
+    }
+
     pub async fn list_databases(&mut self) -> Result<Vec<String>, SchemaCacheError> {
         let now = Instant::now();
         if let Some(cached) = &self.databases {
@@ -77,7 +84,7 @@ impl<B: SchemaBackend> SchemaCacheService<B> {
             .await
             .map_err(SchemaCacheError::Backend)?;
         self.databases = Some(Cached {
-            fetched_at: now,
+            fetched_at: Instant::now(),
             value: value.clone(),
         });
         Ok(value)
@@ -102,7 +109,7 @@ impl<B: SchemaBackend> SchemaCacheService<B> {
         self.tables.insert(
             database_name.to_string(),
             Cached {
-                fetched_at: now,
+                fetched_at: Instant::now(),
                 value: value.clone(),
             },
         );
@@ -130,7 +137,7 @@ impl<B: SchemaBackend> SchemaCacheService<B> {
         self.columns.insert(
             key,
             Cached {
-                fetched_at: now,
+                fetched_at: Instant::now(),
                 value: value.clone(),
             },
         );
@@ -158,7 +165,7 @@ impl<B: SchemaBackend> SchemaCacheService<B> {
         self.relationships.insert(
             key,
             Cached {
-                fetched_at: now,
+                fetched_at: Instant::now(),
                 value: value.clone(),
             },
         );

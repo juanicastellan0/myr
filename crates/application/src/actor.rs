@@ -11,8 +11,11 @@ use myr_core::audit_trail::{unix_timestamp_millis, AuditOutcome, AuditRecord, Fi
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore};
 use myr_core::query_runner::{CancellationToken, ColumnMeta, QueryRow, QueryValue};
 use myr_core::safe_mode::{ConfirmationToken, GuardDecision, SafeModeGuard};
-use myr_core::schema_cache::{ColumnSchema, SchemaScope, TableRelationship};
-use tokio::sync::{broadcast, mpsc, watch};
+use myr_core::schema_cache::{
+    ColumnSchema, SchemaBackend, SchemaBackendError, SchemaCacheError, SchemaCacheService,
+    SchemaScope, TableRelationship,
+};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 
 use crate::ports::{ApplicationBackendError, ApplicationBackendFactory, ApplicationSession};
 use crate::types::{
@@ -24,6 +27,7 @@ use crate::types::{
 const RESULT_BUFFER_CAPACITY: usize = 2_000;
 const QUERY_BATCH_CAPACITY: usize = 2_000;
 const VISUAL_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const SCHEMA_CACHE_TTL: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const QUERY_RETRY_LIMIT: u8 = 1;
 const QUERY_RECONNECT_LIMIT: u8 = 2;
@@ -95,6 +99,7 @@ pub fn spawn_application(
         factory,
         profiles,
         session: None,
+        schema_cache: None,
         active_profile: None,
         snapshot: initial_snapshot,
         command_rx,
@@ -131,6 +136,7 @@ struct ApplicationActor {
     factory: Arc<dyn ApplicationBackendFactory>,
     profiles: FileProfilesStore,
     session: Option<Arc<dyn ApplicationSession>>,
+    schema_cache: Option<SharedSchemaCache>,
     active_profile: Option<ConnectionProfile>,
     snapshot: AppSnapshot,
     command_rx: mpsc::Receiver<AppCommand>,
@@ -149,15 +155,65 @@ struct ApplicationActor {
     active_export: Option<(OperationId, CancellationToken)>,
 }
 
+#[derive(Clone)]
+struct SessionSchemaBackend {
+    session: Arc<dyn ApplicationSession>,
+}
+
+#[async_trait::async_trait]
+impl SchemaBackend for SessionSchemaBackend {
+    async fn list_databases(&self) -> Result<Vec<String>, SchemaBackendError> {
+        self.session
+            .list_databases()
+            .await
+            .map_err(application_to_schema_error)
+    }
+
+    async fn list_tables(&self, database: &str) -> Result<Vec<String>, SchemaBackendError> {
+        self.session
+            .list_tables(database)
+            .await
+            .map_err(application_to_schema_error)
+    }
+
+    async fn list_columns(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnSchema>, SchemaBackendError> {
+        self.session
+            .list_columns(database, table)
+            .await
+            .map_err(application_to_schema_error)
+    }
+
+    async fn list_relationships(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<TableRelationship>, SchemaBackendError> {
+        self.session
+            .list_relationships(database, table)
+            .await
+            .map_err(application_to_schema_error)
+    }
+}
+
+type SharedSchemaCache = Arc<AsyncMutex<SchemaCacheService<SessionSchemaBackend>>>;
+
 enum WorkerEvent {
     Connected {
         operation_id: OperationId,
-        profile: ConnectionProfile,
-        result: Result<(Arc<dyn ApplicationSession>, Vec<String>), AppError>,
+        profile: Box<ConnectionProfile>,
+        result: Result<ConnectionOutcome, AppError>,
     },
     Disconnected {
         operation_id: OperationId,
         result: Result<(), AppError>,
+    },
+    DatabasesLoaded {
+        operation_id: OperationId,
+        result: Result<Vec<String>, AppError>,
     },
     TablesLoaded {
         operation_id: OperationId,
@@ -187,7 +243,7 @@ enum WorkerEvent {
     },
     QueryReconnected {
         operation_id: OperationId,
-        result: Result<(Arc<dyn ApplicationSession>, Vec<String>), AppError>,
+        result: Result<ConnectionOutcome, AppError>,
     },
     ExportProgress {
         operation_id: OperationId,
@@ -198,6 +254,12 @@ enum WorkerEvent {
         operation_id: OperationId,
         result: Result<ExportOutcome, AppError>,
     },
+}
+
+struct ConnectionOutcome {
+    session: Arc<dyn ApplicationSession>,
+    schema_cache: SharedSchemaCache,
+    databases: Vec<String>,
 }
 
 impl ApplicationActor {
@@ -237,8 +299,8 @@ impl ApplicationActor {
             }
             AppCommand::ConnectProfile { profile } => self.begin_connect(profile),
             AppCommand::Disconnect => self.begin_disconnect(),
-            AppCommand::SelectDatabase { database } => self.load_tables(database),
-            AppCommand::SelectTable { database, table } => self.load_table(database, table),
+            AppCommand::SelectDatabase { database } => self.load_tables(database, false),
+            AppCommand::SelectTable { database, table } => self.load_table(database, table, false),
             AppCommand::ReloadSchema { scope } => self.reload_schema(scope),
             AppCommand::ExecuteSql { sql } => self.evaluate_query(sql),
             AppCommand::ConfirmSql { operation_id } => self.confirm_query(operation_id),
@@ -314,6 +376,9 @@ impl ApplicationActor {
 
     fn begin_connect(&mut self, profile: ConnectionProfile) {
         self.cancel_operation(None);
+        self.session = None;
+        self.schema_cache = None;
+        self.active_profile = None;
         let operation_id = self.next_id();
         self.snapshot.last_error = None;
         self.snapshot.connection.status = ConnectionStatus::Connecting;
@@ -328,14 +393,14 @@ impl ApplicationActor {
             let result = tokio::time::timeout(CONNECT_TIMEOUT, async {
                 let session = factory.connect(&profile).await.map_err(app_backend_error)?;
                 let databases = session.list_databases().await.map_err(app_backend_error)?;
-                Ok::<_, AppError>((session, databases))
+                Ok::<_, AppError>(connection_outcome(session, databases))
             })
             .await
             .unwrap_or_else(|_| Err(AppError::new(AppErrorKind::Timeout, "connection timed out")))
             .map_err(|error| error.for_operation(operation_id));
             let _ = worker_tx.send(WorkerEvent::Connected {
                 operation_id,
-                profile,
+                profile: Box::new(profile),
                 result,
             });
         });
@@ -348,6 +413,7 @@ impl ApplicationActor {
         if let Some((_, cancellation)) = self.active_export.take() {
             cancellation.cancel();
         }
+        self.schema_cache = None;
         let Some(session) = self.session.take() else {
             self.snapshot.connection = crate::types::ConnectionSnapshot::default();
             self.snapshot.schema = SchemaSnapshot::default();
@@ -373,8 +439,36 @@ impl ApplicationActor {
         });
     }
 
-    fn load_tables(&mut self, database: String) {
-        let Some(session) = self.session.clone() else {
+    fn load_databases(&mut self, scope: SchemaScope) {
+        let Some(schema_cache) = self.schema_cache.clone() else {
+            self.emit_error(AppError::new(AppErrorKind::Connection, "not connected"));
+            return;
+        };
+        let operation_id = self.next_id();
+        if scope == SchemaScope::All {
+            self.snapshot.schema = SchemaSnapshot::default();
+        }
+        self.snapshot.schema.databases.clear();
+        self.snapshot.schema.loading = true;
+        self.snapshot.schema.operation_id = Some(operation_id);
+        self.publish_snapshot();
+        let worker_tx = self.worker_tx.clone();
+        tokio::spawn(async move {
+            let result = {
+                let mut cache = schema_cache.lock().await;
+                cache.invalidate_scope(&scope);
+                cache.list_databases().await.map_err(schema_cache_error)
+            }
+            .map_err(|error| error.for_operation(operation_id));
+            let _ = worker_tx.send(WorkerEvent::DatabasesLoaded {
+                operation_id,
+                result,
+            });
+        });
+    }
+
+    fn load_tables(&mut self, database: String, invalidate: bool) {
+        let Some(schema_cache) = self.schema_cache.clone() else {
             self.emit_error(AppError::new(AppErrorKind::Connection, "not connected"));
             return;
         };
@@ -389,11 +483,19 @@ impl ApplicationActor {
         self.publish_snapshot();
         let worker_tx = self.worker_tx.clone();
         tokio::spawn(async move {
-            let result = session
-                .list_tables(&database)
-                .await
-                .map_err(app_backend_error)
-                .map_err(|error| error.for_operation(operation_id));
+            let result = {
+                let mut cache = schema_cache.lock().await;
+                if invalidate {
+                    cache.invalidate_scope(&SchemaScope::Tables {
+                        database: database.clone(),
+                    });
+                }
+                cache
+                    .list_tables(&database)
+                    .await
+                    .map_err(schema_cache_error)
+            }
+            .map_err(|error| error.for_operation(operation_id));
             let _ = worker_tx.send(WorkerEvent::TablesLoaded {
                 operation_id,
                 database,
@@ -402,8 +504,8 @@ impl ApplicationActor {
         });
     }
 
-    fn load_table(&mut self, database: String, table: String) {
-        let Some(session) = self.session.clone() else {
+    fn load_table(&mut self, database: String, table: String, invalidate: bool) {
+        let Some(schema_cache) = self.schema_cache.clone() else {
             self.emit_error(AppError::new(AppErrorKind::Connection, "not connected"));
             return;
         };
@@ -417,18 +519,26 @@ impl ApplicationActor {
         self.publish_snapshot();
         let worker_tx = self.worker_tx.clone();
         tokio::spawn(async move {
-            let (columns, relationships) = tokio::join!(
-                session.list_columns(&database, &table),
-                session.list_relationships(&database, &table),
-            );
-            let result = columns
-                .map_err(app_backend_error)
-                .and_then(|columns| {
-                    relationships
-                        .map(|relationships| (columns, relationships))
-                        .map_err(app_backend_error)
-                })
-                .map_err(|error| error.for_operation(operation_id));
+            let result = async {
+                let mut cache = schema_cache.lock().await;
+                if invalidate {
+                    cache.invalidate_scope(&SchemaScope::Table {
+                        database: database.clone(),
+                        table: table.clone(),
+                    });
+                }
+                let columns = cache
+                    .list_columns(&database, &table)
+                    .await
+                    .map_err(schema_cache_error)?;
+                let relationships = cache
+                    .list_relationships(&database, &table)
+                    .await
+                    .map_err(schema_cache_error)?;
+                Ok::<_, AppError>((columns, relationships))
+            }
+            .await
+            .map_err(|error| error.for_operation(operation_id));
             let _ = worker_tx.send(WorkerEvent::TableLoaded {
                 operation_id,
                 database,
@@ -440,13 +550,9 @@ impl ApplicationActor {
 
     fn reload_schema(&mut self, scope: SchemaScope) {
         match scope {
-            SchemaScope::All | SchemaScope::Databases => {
-                if let Some(profile) = self.active_profile.clone() {
-                    self.begin_connect(profile);
-                }
-            }
-            SchemaScope::Tables { database } => self.load_tables(database),
-            SchemaScope::Table { database, table } => self.load_table(database, table),
+            SchemaScope::All | SchemaScope::Databases => self.load_databases(scope),
+            SchemaScope::Tables { database } => self.load_tables(database, true),
+            SchemaScope::Table { database, table } => self.load_table(database, table, true),
         }
     }
 
@@ -615,6 +721,7 @@ impl ApplicationActor {
             return;
         };
         self.session = None;
+        self.schema_cache = None;
         self.snapshot.connection.status = ConnectionStatus::Reconnecting;
         self.snapshot.connection.operation_id = Some(operation_id);
         self.publish_snapshot();
@@ -634,7 +741,7 @@ impl ApplicationActor {
             let result = tokio::time::timeout(CONNECT_TIMEOUT, async {
                 let session = factory.connect(&profile).await.map_err(app_backend_error)?;
                 let databases = session.list_databases().await.map_err(app_backend_error)?;
-                Ok::<_, AppError>((session, databases))
+                Ok::<_, AppError>(connection_outcome(session, databases))
             })
             .await
             .unwrap_or_else(|_| Err(AppError::new(AppErrorKind::Timeout, "reconnect timed out")))
@@ -731,20 +838,23 @@ impl ApplicationActor {
                 if self.snapshot.connection.operation_id != Some(operation_id) {
                     return;
                 }
+                let profile = *profile;
                 match result {
-                    Ok((session, databases)) => {
-                        self.session = Some(session);
+                    Ok(outcome) => {
+                        self.session = Some(outcome.session);
+                        self.schema_cache = Some(outcome.schema_cache);
                         self.active_profile = Some(profile.clone());
                         self.snapshot.connection.status = ConnectionStatus::Connected;
                         self.snapshot.connection.profile_name = Some(profile.name);
                         self.snapshot.connection.operation_id = None;
-                        self.snapshot.schema.databases = databases;
+                        self.snapshot.schema.databases = outcome.databases;
                         self.snapshot.schema.loading = false;
                         self.publish_snapshot();
                         self.emit_finished(operation_id, OperationKind::Connection);
                     }
                     Err(error) => {
                         self.session = None;
+                        self.schema_cache = None;
                         self.active_profile = None;
                         self.snapshot.connection.status = ConnectionStatus::Disconnected;
                         self.snapshot.connection.operation_id = None;
@@ -760,12 +870,31 @@ impl ApplicationActor {
                     return;
                 }
                 self.active_profile = None;
+                self.schema_cache = None;
                 self.snapshot.connection = crate::types::ConnectionSnapshot::default();
                 self.snapshot.schema = SchemaSnapshot::default();
                 self.snapshot.query.running = false;
                 self.publish_snapshot();
                 match result {
                     Ok(()) => self.emit_finished(operation_id, OperationKind::Connection),
+                    Err(error) => self.emit_error(error),
+                }
+            }
+            WorkerEvent::DatabasesLoaded {
+                operation_id,
+                result,
+            } => {
+                if self.snapshot.schema.operation_id != Some(operation_id) {
+                    return;
+                }
+                self.snapshot.schema.loading = false;
+                self.snapshot.schema.operation_id = None;
+                match result {
+                    Ok(databases) => {
+                        self.snapshot.schema.databases = databases;
+                        self.publish_snapshot();
+                        self.emit_finished(operation_id, OperationKind::Schema);
+                    }
                     Err(error) => self.emit_error(error),
                 }
             }
@@ -948,11 +1077,13 @@ impl ApplicationActor {
                     return;
                 }
                 match result {
-                    Ok((session, databases)) => {
+                    Ok(outcome) => {
+                        let session = outcome.session;
                         self.session = Some(session.clone());
+                        self.schema_cache = Some(outcome.schema_cache);
                         self.snapshot.connection.status = ConnectionStatus::Connected;
                         self.snapshot.connection.operation_id = None;
-                        self.snapshot.schema.databases = databases;
+                        self.snapshot.schema.databases = outcome.databases;
                         self.publish_snapshot();
                         let cancellation = self
                             .active_query
@@ -1493,6 +1624,34 @@ impl StreamingExportWriter {
     }
 }
 
+fn connection_outcome(
+    session: Arc<dyn ApplicationSession>,
+    databases: Vec<String>,
+) -> ConnectionOutcome {
+    let backend = SessionSchemaBackend {
+        session: session.clone(),
+    };
+    let mut schema_cache = SchemaCacheService::new(backend, SCHEMA_CACHE_TTL);
+    schema_cache.prime_databases(databases.clone());
+    ConnectionOutcome {
+        session,
+        schema_cache: Arc::new(AsyncMutex::new(schema_cache)),
+        databases,
+    }
+}
+
+fn application_to_schema_error(error: ApplicationBackendError) -> SchemaBackendError {
+    SchemaBackendError::new(error.message)
+}
+
+fn schema_cache_error(error: SchemaCacheError) -> AppError {
+    match error {
+        SchemaCacheError::Backend(source) => {
+            AppError::new(AppErrorKind::Schema, source.to_string())
+        }
+    }
+}
+
 fn app_backend_error(error: ApplicationBackendError) -> AppError {
     AppError {
         kind: error.kind,
@@ -1776,6 +1935,25 @@ mod tests {
         .await;
     }
 
+    async fn wait_for_finished(
+        events: &mut broadcast::Receiver<AppEvent>,
+        expected: OperationKind,
+    ) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match events.recv().await {
+                    Ok(AppEvent::Finished { kind, .. }) if kind == expected => return,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("application event stream closed")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("application operation did not finish");
+    }
+
     #[tokio::test]
     async fn connect_loads_only_databases() {
         let temp_dir = TempDir::new().expect("temp dir should create");
@@ -1807,6 +1985,16 @@ mod tests {
         assert_eq!(counts.tables.load(Ordering::Relaxed), 1);
         assert_eq!(counts.columns.load(Ordering::Relaxed), 0);
 
+        let mut events = handle.subscribe();
+        handle
+            .command(AppCommand::SelectDatabase {
+                database: "app".to_string(),
+            })
+            .await
+            .expect("cached database selection should send");
+        wait_for_finished(&mut events, OperationKind::Schema).await;
+        assert_eq!(counts.tables.load(Ordering::Relaxed), 1);
+
         handle
             .command(AppCommand::SelectTable {
                 database: "app".to_string(),
@@ -1821,6 +2009,17 @@ mod tests {
         assert_eq!(counts.columns.load(Ordering::Relaxed), 1);
         assert_eq!(counts.relationships.load(Ordering::Relaxed), 1);
         assert_eq!(snapshot.schema.columns[0].name, "id");
+
+        handle
+            .command(AppCommand::SelectTable {
+                database: "app".to_string(),
+                table: "users".to_string(),
+            })
+            .await
+            .expect("cached table selection should send");
+        wait_for_finished(&mut events, OperationKind::Schema).await;
+        assert_eq!(counts.columns.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.relationships.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -2037,9 +2236,11 @@ mod tests {
             .expect("database reload should send");
         wait_for(&handle, |snapshot| {
             snapshot.connection.status == ConnectionStatus::Connected
-                && counts.connects.load(Ordering::Relaxed) == 2
+                && !snapshot.schema.loading
+                && counts.databases.load(Ordering::Relaxed) == 2
         })
         .await;
+        assert_eq!(counts.connects.load(Ordering::Relaxed), 1);
         handle
             .command(AppCommand::ReloadSchema {
                 scope: SchemaScope::Tables {

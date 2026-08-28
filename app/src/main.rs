@@ -653,13 +653,22 @@ fn row_as_json_object(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut object = serde_json::Map::with_capacity(headers.len());
     for (index, header) in headers.iter().enumerate() {
-        let value = row.get(index).map_or(serde_json::Value::Null, |value| {
-            if typed_values {
-                value.typed_json_value()
-            } else {
-                serde_json::Value::String(value.display_text())
-            }
-        });
+        let value = row.get(index).map_or_else(
+            || {
+                if typed_values {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(String::new())
+                }
+            },
+            |value| {
+                if typed_values {
+                    value.typed_json_value()
+                } else {
+                    serde_json::Value::String(value.display_text())
+                }
+            },
+        );
         object.insert(header.clone(), value);
     }
     object
@@ -1072,7 +1081,50 @@ mod tests {
         let typed = row_as_json_object(&headers, &[QueryValue::UInt(7)], true);
         assert_eq!(typed["value"], serde_json::json!(7));
         assert_eq!(typed["missing"], serde_json::Value::Null);
-        let legacy = row_as_json_object(&headers[..1], &[QueryValue::Null], false);
+        let legacy = row_as_json_object(&headers, &[QueryValue::Null], false);
         assert_eq!(legacy["value"], serde_json::json!("NULL"));
+        assert_eq!(legacy["missing"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn query_json_modes_match_golden_contracts() {
+        let headers = [
+            "a_null".to_string(),
+            "b_int".to_string(),
+            "c_uint".to_string(),
+            "d_float".to_string(),
+            "e_text".to_string(),
+            "f_bytes".to_string(),
+            "g_datetime".to_string(),
+            "h_time".to_string(),
+        ];
+        let row = [
+            QueryValue::Null,
+            QueryValue::Int(-9),
+            QueryValue::UInt(10),
+            QueryValue::Float(1.25),
+            QueryValue::Text("hello".to_string()),
+            QueryValue::Bytes(b"raw".to_vec()),
+            QueryValue::DateTime("2024-05-06 07:08:09.123456".to_string()),
+            QueryValue::Time("000 10:11:12.654321".to_string()),
+        ];
+
+        let legacy = serde_json::to_string(&serde_json::Value::Object(row_as_json_object(
+            &headers, &row, false,
+        )))
+        .expect("legacy JSON should serialize");
+        let typed = serde_json::to_string(&serde_json::Value::Object(row_as_json_object(
+            &headers, &row, true,
+        )))
+        .expect("typed JSON should serialize");
+
+        assert_eq!(
+            format!("{legacy}\n"),
+            include_str!("../tests/golden/query-default.jsonl")
+        );
+        assert_eq!(
+            format!("{typed}\n"),
+            include_str!("../tests/golden/query-typed.jsonl")
+        );
     }
 }
