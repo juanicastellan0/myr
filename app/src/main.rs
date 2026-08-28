@@ -1117,14 +1117,14 @@ mod tests {
             &headers, &row, true,
         )))
         .expect("typed JSON should serialize");
+        let legacy_golden = include_str!("../tests/golden/query-default.jsonl")
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        let typed_golden = include_str!("../tests/golden/query-typed.jsonl")
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
 
-        assert_eq!(
-            format!("{legacy}\n"),
-            include_str!("../tests/golden/query-default.jsonl")
-        );
-        assert_eq!(
-            format!("{typed}\n"),
-            include_str!("../tests/golden/query-typed.jsonl")
-        );
+        assert_eq!(format!("{legacy}\n"), legacy_golden);
+        assert_eq!(format!("{typed}\n"), typed_golden);
     }
 }
