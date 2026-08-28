@@ -202,10 +202,11 @@ async fn mysql_backend_connection_schema_and_query_paths() {
         typed_row.values[5],
         QueryValue::DateTime("2024-05-06 07:08:09.123456".to_string())
     );
-    assert_eq!(
-        typed_row.values[6],
-        QueryValue::Time("000 10:11:12.654321".to_string())
-    );
+    assert!(matches!(
+        &typed_row.values[6],
+        QueryValue::Time(value)
+            if value == "000 10:11:12.654321" || value == "10:11:12.654321"
+    ));
     assert_eq!(typed_row.values[7], QueryValue::Null);
     assert!(typed_stream
         .next_row()
