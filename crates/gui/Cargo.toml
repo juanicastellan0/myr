@@ -1,0 +1,23 @@
+[package]
+name = "myr-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland"] }
+myr-application = { path = "../application" }
+myr-core = { path = "../core" }
+rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+iced_test = "=0.14.0"
+tempfile = "3"
+
+[lints]
+workspace = true

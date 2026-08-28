@@ -116,8 +116,8 @@ fn build_aligned_results_rows(
             .map(|column_index| {
                 row.values
                     .get(column_index)
-                    .cloned()
-                    .unwrap_or_else(String::new)
+                    .map(QueryValue::display_text)
+                    .unwrap_or_default()
             })
             .collect::<Vec<_>>();
         let row_text = format_aligned_cells(
@@ -179,7 +179,7 @@ fn compute_results_layout(
             let value_len = rows
                 .iter()
                 .filter_map(|row| row.values.get(column_index))
-                .map(|value| char_len(value))
+                .map(|value| char_len(&value.display_text()))
                 .max()
                 .unwrap_or(0);
             header_len.max(value_len).clamp(3, 28)

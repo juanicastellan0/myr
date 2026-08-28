@@ -4,11 +4,14 @@ members = [
   "crates/core",
   "crates/tui",
   "crates/adapters",
+  "crates/application",
+  "crates/gui",
+  "gui-app",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0-alpha.1"
 edition = "2021"
 license = "MIT"
 

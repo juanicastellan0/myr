@@ -2,7 +2,7 @@ use std::io;
 use std::time::Instant;
 
 use myr_adapters::mysql::MysqlDataBackend;
-use myr_core::query_runner::{QueryBackend, QueryRowStream};
+use myr_core::query_runner::{QueryBackend, QueryRowStream, QueryValue};
 
 use crate::io_other;
 use crate::model::QueryMetrics;
@@ -80,9 +80,15 @@ pub(crate) async fn query_scalar_u64(backend: &MysqlDataBackend, sql: &str) -> i
         .values
         .first()
         .ok_or_else(|| io_other("query returned no columns"))?;
-    value
-        .parse::<u64>()
-        .map_err(|error| io_other(format!("failed to parse scalar value `{value}`: {error}")))
+    match value {
+        QueryValue::UInt(value) => Ok(*value),
+        QueryValue::Int(value) => u64::try_from(*value)
+            .map_err(|error| io_other(format!("failed to parse scalar value `{value}`: {error}"))),
+        value => value
+            .display_text()
+            .parse::<u64>()
+            .map_err(|error| io_other(format!("failed to parse scalar value `{value}`: {error}"))),
+    }
 }
 
 pub(crate) fn build_insert_batch_sql(start: u64, end: u64) -> String {

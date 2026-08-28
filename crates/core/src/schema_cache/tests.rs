@@ -6,20 +6,120 @@ use std::time::Duration;
 
 use super::{
     ColumnSchema, DatabaseSchema, ForeignKeySchema, RelationshipDirection, SchemaBackend,
-    SchemaBackendError, SchemaCacheService, SchemaCatalog, TableSchema,
+    SchemaBackendError, SchemaCacheService, SchemaCatalog, SchemaScope, TableRelationship,
+    TableSchema,
 };
+
+#[derive(Debug, Default)]
+struct BackendCounts {
+    databases: AtomicUsize,
+    tables: AtomicUsize,
+    columns: AtomicUsize,
+    relationships: AtomicUsize,
+}
 
 #[derive(Debug, Clone)]
 struct FakeSchemaBackend {
-    fetch_count: Arc<AtomicUsize>,
+    counts: Arc<BackendCounts>,
     schema: SchemaCatalog,
 }
 
 #[async_trait::async_trait]
 impl SchemaBackend for FakeSchemaBackend {
-    async fn fetch_schema(&self) -> Result<SchemaCatalog, SchemaBackendError> {
-        self.fetch_count.fetch_add(1, Ordering::Relaxed);
-        Ok(self.schema.clone())
+    async fn list_databases(&self) -> Result<Vec<String>, SchemaBackendError> {
+        self.counts.databases.fetch_add(1, Ordering::Relaxed);
+        Ok(self
+            .schema
+            .databases
+            .iter()
+            .map(|database| database.name.clone())
+            .collect())
+    }
+
+    async fn list_tables(&self, database: &str) -> Result<Vec<String>, SchemaBackendError> {
+        self.counts.tables.fetch_add(1, Ordering::Relaxed);
+        Ok(self
+            .schema
+            .database(database)
+            .map(|database| {
+                database
+                    .tables
+                    .iter()
+                    .map(|table| table.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn list_columns(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnSchema>, SchemaBackendError> {
+        self.counts.columns.fetch_add(1, Ordering::Relaxed);
+        Ok(self
+            .schema
+            .database(database)
+            .and_then(|database| {
+                database
+                    .tables
+                    .iter()
+                    .find(|candidate| candidate.name == table)
+            })
+            .map(|table| table.columns.clone())
+            .unwrap_or_default())
+    }
+
+    async fn list_relationships(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<TableRelationship>, SchemaBackendError> {
+        self.counts.relationships.fetch_add(1, Ordering::Relaxed);
+        let mut output = Vec::new();
+        let Some(database_schema) = self.schema.database(database) else {
+            return Ok(output);
+        };
+
+        if let Some(table_schema) = database_schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+        {
+            output.extend(
+                table_schema
+                    .foreign_keys
+                    .iter()
+                    .map(|foreign_key| TableRelationship {
+                        direction: RelationshipDirection::Outbound,
+                        constraint_name: foreign_key.constraint_name.clone(),
+                        source_column: foreign_key.column_name.clone(),
+                        related_database: foreign_key.referenced_database.clone(),
+                        related_table: foreign_key.referenced_table.clone(),
+                        related_column: foreign_key.referenced_column.clone(),
+                    }),
+            );
+        }
+        for candidate in &database_schema.tables {
+            output.extend(
+                candidate
+                    .foreign_keys
+                    .iter()
+                    .filter(|foreign_key| {
+                        foreign_key.referenced_database == database
+                            && foreign_key.referenced_table == table
+                    })
+                    .map(|foreign_key| TableRelationship {
+                        direction: RelationshipDirection::Inbound,
+                        constraint_name: foreign_key.constraint_name.clone(),
+                        source_column: foreign_key.referenced_column.clone(),
+                        related_database: database.to_string(),
+                        related_table: candidate.name.clone(),
+                        related_column: foreign_key.column_name.clone(),
+                    }),
+            );
+        }
+        Ok(output)
     }
 }
 
@@ -92,9 +192,9 @@ fn sample_schema() -> SchemaCatalog {
 
 #[tokio::test]
 async fn uses_cache_within_ttl() {
-    let fetch_count = Arc::new(AtomicUsize::new(0));
+    let counts = Arc::new(BackendCounts::default());
     let backend = FakeSchemaBackend {
-        fetch_count: Arc::clone(&fetch_count),
+        counts: Arc::clone(&counts),
         schema: sample_schema(),
     };
     let mut cache = SchemaCacheService::new(backend, Duration::from_secs(60));
@@ -108,16 +208,19 @@ async fn uses_cache_within_ttl() {
         .await
         .expect("second read should use cache");
 
-    assert_eq!(fetch_count.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.databases.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.tables.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.columns.load(Ordering::Relaxed), 0);
+    assert_eq!(counts.relationships.load(Ordering::Relaxed), 0);
     assert_eq!(databases, vec!["app".to_string(), "analytics".to_string()]);
     assert_eq!(tables, vec!["users".to_string(), "sessions".to_string()]);
 }
 
 #[tokio::test]
 async fn zero_ttl_refetches_on_each_request() {
-    let fetch_count = Arc::new(AtomicUsize::new(0));
+    let counts = Arc::new(BackendCounts::default());
     let backend = FakeSchemaBackend {
-        fetch_count: Arc::clone(&fetch_count),
+        counts: Arc::clone(&counts),
         schema: sample_schema(),
     };
     let mut cache = SchemaCacheService::new(backend, Duration::ZERO);
@@ -131,13 +234,13 @@ async fn zero_ttl_refetches_on_each_request() {
         .await
         .expect("second read should refresh schema");
 
-    assert_eq!(fetch_count.load(Ordering::Relaxed), 2);
+    assert_eq!(counts.databases.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
 async fn list_columns_returns_expected_shape() {
     let backend = FakeSchemaBackend {
-        fetch_count: Arc::new(AtomicUsize::new(0)),
+        counts: Arc::new(BackendCounts::default()),
         schema: sample_schema(),
     };
     let mut cache = SchemaCacheService::new(backend, Duration::from_secs(60));
@@ -155,7 +258,7 @@ async fn list_columns_returns_expected_shape() {
 #[tokio::test]
 async fn list_related_tables_returns_outbound_and_inbound_relationships() {
     let backend = FakeSchemaBackend {
-        fetch_count: Arc::new(AtomicUsize::new(0)),
+        counts: Arc::new(BackendCounts::default()),
         schema: sample_schema(),
     };
     let mut cache = SchemaCacheService::new(backend, Duration::from_secs(60));
@@ -178,4 +281,38 @@ async fn list_related_tables_returns_outbound_and_inbound_relationships() {
     assert_eq!(outbound[0].direction, RelationshipDirection::Outbound);
     assert_eq!(outbound[0].related_table, "users");
     assert_eq!(outbound[0].related_column, "id");
+}
+
+#[tokio::test]
+async fn scopes_load_lazily_and_invalidation_is_targeted() {
+    let counts = Arc::new(BackendCounts::default());
+    let backend = FakeSchemaBackend {
+        counts: Arc::clone(&counts),
+        schema: sample_schema(),
+    };
+    let mut cache = SchemaCacheService::new(backend, Duration::from_secs(60));
+
+    cache.list_databases().await.expect("databases should load");
+    assert_eq!(counts.tables.load(Ordering::Relaxed), 0);
+    assert_eq!(counts.columns.load(Ordering::Relaxed), 0);
+
+    cache.list_tables("app").await.expect("tables should load");
+    assert_eq!(counts.columns.load(Ordering::Relaxed), 0);
+
+    cache
+        .list_columns("app", "users")
+        .await
+        .expect("columns should load");
+    cache.invalidate_scope(&SchemaScope::Table {
+        database: "app".to_string(),
+        table: "users".to_string(),
+    });
+    cache
+        .list_columns("app", "users")
+        .await
+        .expect("invalidated columns should reload");
+
+    assert_eq!(counts.databases.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.tables.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.columns.load(Ordering::Relaxed), 2);
 }

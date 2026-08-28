@@ -19,6 +19,16 @@ impl TuiApp {
                 }
             }
             Pane::QueryEditor => {
+                if let Some(operation_id) = self.application_confirmation.take() {
+                    if let Some(application) = &self.application_handle {
+                        let _ = application
+                            .try_command(AppCommand::ConfirmSql { operation_id });
+                        self.set_active_pane(Pane::Results);
+                        self.query_running = true;
+                        self.status_line = "Running confirmed query...".to_string();
+                    }
+                    return;
+                }
                 if let Some((token, sql)) = self.pending_confirmation.take() {
                     match self.safe_mode_guard.confirm(&token, &sql) {
                         Ok(()) => {

@@ -10,30 +10,45 @@ This document captures the current runtime architecture for `myr`, with emphasis
 
 ## Workspace Layering And Dependency Direction
 
-`myr` is organized as a layered workspace:
+`myr` is organized around a shared application actor:
 
 ```text
-app (entrypoints + CLI orchestration)
-  -> myr-tui (interactive runtime + rendering)
-  -> myr-adapters (MySQL + export implementations)
-  -> myr-core (domain contracts, policies, and services)
+myr-core
+   ↑
+myr-application ← myr-adapters
+   ↑                  ↑
+myr-tui          app / gui-app
+myr-gui
 ```
 
 Dependency rules reflected in `Cargo.toml` files:
 
 - `myr-core` is domain-only and does not depend on `myr-tui` or `myr-adapters`.
-- `myr-adapters` depends on `myr-core` contracts to provide concrete MySQL/export behavior.
-- `myr-tui` depends on both `myr-core` and `myr-adapters` because it orchestrates domain actions and IO-backed workflows.
-- `myr-app` is composition-only: it wires runtime modes and delegates to TUI/core/adapters.
+- `myr-application` owns UI-independent commands, events, snapshots, safe mode/read-only enforcement, scoped schema state, bounded results, cancellation, export state, and profile mutations.
+- `myr-adapters` implements the application ports with `mysql_async` and also retains low-level CLI/export adapters.
+- `myr-gui` and the composed TUI consume `ApplicationHandle`; presentation state such as panes, focus, scroll, tabs, and themes never enters `AppSnapshot`.
+- `myr-app` and `gui-app` are composition roots. They create one Tokio runtime, mount the MySQL factory, and pass a handle to their presentation.
 
-Practical implication: keep policy/decision logic in `myr-core`, keep protocol/driver code in `myr-adapters`, and keep user-interaction orchestration in `myr-tui`.
+Practical implication: keep policy in `myr-core`, workflows in `myr-application`, protocol code in `myr-adapters`, and presentation-only decisions in TUI/GUI.
+
+## Shared Actor Runtime
+
+`ApplicationHandle` sends `AppCommand` values over a bounded Tokio channel and exposes a watch snapshot plus broadcast events. Every connection, schema, query, and export operation receives a monotonically increasing `OperationId`; worker responses whose ID is no longer active are ignored.
+
+Query workers stream typed rows in batches no faster than 10 Hz. The actor retains the newest 2,000 rows and publishes `rows_seen`, `rows_buffered`, and `truncated`. Cancellation is cooperative through `CancellationToken`. Full-query exports accept read-only SQL only, write to `<destination>.part`, report rows/bytes, remove partials on error/cancel, and rename only after completion.
+
+Schema loading is scope-directed: connect calls only `list_databases`; database selection calls `list_tables`; table selection calls `list_columns` and `list_relationships`. `SchemaCacheService` independently caches each scope with TTL and targeted invalidation.
+
+Profile writes use a sidecar filesystem lock, reload-under-lock mutation, temporary-file sync, and atomic replacement. `ConnectionProfile` contains password-source metadata but no password value.
 
 ## Runtime Topology
 
 Primary crates involved in runtime flow:
 
-- `app/src/main.rs`: binary entrypoint, calls `myr_tui::run()`
-- `crates/tui/src/lib.rs`: terminal setup/restore + outer render/event loop
+- `app/src/main.rs`: CLI/TUI composition root; creates the shared actor and calls `myr_tui::run_with_application(...)`
+- `gui-app/src/main.rs`: native GUI composition root for the `myr-gui` binary
+- `crates/gui/src/*`: Iced presentation, GUI-only preferences, and headless UI tests
+- `crates/tui/src/lib.rs`: terminal setup/restore + outer render/event loop over an `ApplicationHandle`
 - `crates/tui/src/app_logic/*`: message handling, navigation, query/connect orchestration
 - `crates/tui/src/lib_helpers.rs`: key mapping and worker functions
 - `crates/core/src/actions_engine/*`: action catalog, ranking, enablement, invocation mapping
@@ -60,26 +75,26 @@ Design constraints used by this layout:
 
 ## State Ownership And Concurrency Rules
 
-`TuiApp` (in `state/app.rs`) is the single mutable owner of runtime state on the UI thread.
-Concurrency is explicit and message-like:
+`TuiApp` (in `state/app.rs`) is the single mutable owner of terminal presentation state. The shared application actor owns connection, schema, query, result, export, and profile workflow state. Concurrency is explicit and message-like:
 
 - input/tick events become `Msg` values
 - `Msg` is handled synchronously in `TuiApp::handle`
-- connect/query workers run on dedicated threads and return a single `ConnectWorkerOutcome`/`QueryWorkerOutcome` over `mpsc`
-- cancellation uses `CancellationToken`, which is the only cross-thread control signal during query streaming
+- production actions become `AppCommand` values sent through `ApplicationHandle`
+- each tick reads the latest `AppSnapshot`; operation IDs reject stale worker responses
+- cancellation is an application command backed by a shared `CancellationToken`
 
-This keeps race risk low: worker threads do not hold references to `TuiApp` fields.
+The older direct worker path remains available only for the demo/compatibility harness used by existing TUI tests; composed production entrypoints always provide an application handle.
 
 ## Runtime Modes And Entrypoints
 
 `app/src/main.rs` provides four runtime modes:
 
-- default/no subcommand: launches `myr_tui::run()`
+- default/no subcommand: composes the actor and launches `myr_tui::run_with_application(...)`
 - `query`: non-interactive SQL execution to JSONL output
 - `export`: non-interactive export to CSV/JSON/JSONL (+ gzip variants)
 - `doctor`: connection/schema/query smoke diagnostics
 
-All non-interactive modes reuse the same core/adapters services (`ConnectionManager`, `SchemaCacheService`, `QueryBackend`).
+`query` and `export` drive the same `AppCommand`/`AppEvent` contract as both user interfaces. `doctor` deliberately uses the low-level adapters so it can diagnose individual connection, schema, and query checks.
 The benchmark binary (`app/src/bin/benchmark.rs`) is separate and split by concern (`parser`, `runner`, `report`, `model`) to avoid mixing CLI parsing, measurement, and policy checks.
 
 ## Event Loop And Message Flow
@@ -110,13 +125,13 @@ crossterm event::poll/read
 
 `Msg::Tick` is also the synchronization point for background work:
 
-- `poll_connect_result()` checks connect worker channel
-- `poll_query_result()` checks query worker channel
+- the production TUI applies the newest `AppSnapshot`
+- the compatibility harness polls its legacy connect/query worker channels
 - spinner/status lines are refreshed while work is in flight
 
-## Worker Lifecycle (Connect/Query + Cancellation)
+## Legacy TUI Worker Lifecycle (Compatibility Harness)
 
-Background work is isolated in short-lived threads, each returning one outcome through `std::sync::mpsc`.
+The following short-lived thread path is retained for demo behavior and regression tests. It is not used by `myr-app`; production connect/query/export work runs as cancelable Tokio tasks inside `myr-application`.
 
 ### Connect Worker Lifecycle
 

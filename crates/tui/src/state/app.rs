@@ -5,6 +5,8 @@ use super::runtime::{ConnectIntent, ConnectWorkerOutcome, ErrorPanel, QueryWorke
 use super::wizard::ConnectionWizardForm;
 
 pub(crate) struct TuiApp {
+    pub(crate) application_handle: Option<ApplicationHandle>,
+    pub(crate) application_confirmation: Option<OperationId>,
     pub(crate) actions: ActionsEngine,
     pub(crate) pane: Pane,
     pub(crate) wizard_form: ConnectionWizardForm,

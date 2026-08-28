@@ -283,6 +283,19 @@ impl TuiApp {
             return;
         };
 
+        if let Some(application) = &self.application_handle {
+            self.schema_tables.clear();
+            self.schema_columns.clear();
+            self.schema_column_schemas.clear();
+            self.schema_relationships.clear();
+            self.selection.table = None;
+            let _ = application.try_command(AppCommand::SelectDatabase {
+                database: database_name,
+            });
+            self.status_line = "Loading tables...".to_string();
+            return;
+        }
+
         if let Some(schema_cache) = self.schema_cache.as_mut() {
             self.schema_tables = match block_on_result(schema_cache.list_tables(&database_name)) {
                 Ok(tables) => tables,
@@ -319,6 +332,20 @@ impl TuiApp {
             self.selected_relationship_index = 0;
             return;
         };
+
+        if let (Some(application), Some(database)) =
+            (&self.application_handle, self.active_database.clone())
+        {
+            self.schema_columns.clear();
+            self.schema_column_schemas.clear();
+            self.schema_relationships.clear();
+            let _ = application.try_command(AppCommand::SelectTable {
+                database,
+                table: table_name,
+            });
+            self.status_line = "Loading columns...".to_string();
+            return;
+        }
 
         if let Some(schema_cache) = self.schema_cache.as_mut() {
             if let Some(database_name) = self.active_database.clone() {

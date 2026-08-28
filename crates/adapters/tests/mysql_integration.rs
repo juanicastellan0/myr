@@ -1,7 +1,7 @@
 use myr_adapters::mysql::{MysqlConnectionBackend, MysqlDataBackend};
 use myr_core::connection_manager::ConnectionBackend;
 use myr_core::profiles::ConnectionProfile;
-use myr_core::query_runner::{QueryBackend, QueryRowStream};
+use myr_core::query_runner::{QueryBackend, QueryRowStream, QueryValue};
 use myr_core::schema_cache::SchemaBackend;
 
 fn mysql_integration_enabled() -> bool {
@@ -88,23 +88,23 @@ async fn mysql_backend_connection_schema_and_query_paths() {
     )
     .await;
 
-    let schema = backend
-        .fetch_schema()
+    let databases = backend
+        .list_databases()
         .await
-        .expect("schema fetch should succeed");
-    let db = schema
-        .databases
-        .iter()
-        .find(|db| db.name == database)
-        .expect("database should be listed");
-    let table = db
-        .tables
-        .iter()
-        .find(|table| table.name == "integration_users")
-        .expect("table should be listed");
-    assert!(table.columns.iter().any(|column| column.name == "id"));
-    assert!(table.columns.iter().any(|column| column.name == "email"));
-    assert!(table.columns.iter().any(|column| column.name == "age"));
+        .expect("database listing should succeed");
+    assert!(databases.iter().any(|candidate| candidate == database));
+    let tables = backend
+        .list_tables(database)
+        .await
+        .expect("table listing should succeed");
+    assert!(tables.iter().any(|table| table == "integration_users"));
+    let columns = backend
+        .list_columns(database, "integration_users")
+        .await
+        .expect("column listing should succeed");
+    assert!(columns.iter().any(|column| column.name == "id"));
+    assert!(columns.iter().any(|column| column.name == "email"));
+    assert!(columns.iter().any(|column| column.name == "age"));
 
     let mut query_stream = backend
         .start_query("SELECT id, email, age FROM integration_users ORDER BY id")
@@ -125,10 +125,13 @@ async fn mysql_backend_connection_schema_and_query_paths() {
         .await
         .expect("stream should end cleanly");
 
-    assert_eq!(row_1.values[0], "1");
-    assert_eq!(row_1.values[1], "a@example.com");
-    assert_eq!(row_2.values[0], "2");
-    assert_eq!(row_2.values[2], "NULL");
+    assert_eq!(row_1.values[0], QueryValue::Int(1));
+    assert_eq!(
+        row_1.values[1],
+        QueryValue::Text("a@example.com".to_string())
+    );
+    assert_eq!(row_2.values[0], QueryValue::Int(2));
+    assert_eq!(row_2.values[2], QueryValue::Null);
     assert!(end.is_none());
 
     let mut cancellable_stream = backend
@@ -145,6 +148,52 @@ async fn mysql_backend_connection_schema_and_query_paths() {
         .expect("cancelled stream should return none");
     assert!(cancelled_end.is_none());
 
+    execute_sql(&backend, "DROP TABLE IF EXISTS integration_types").await;
+    execute_sql(
+        &backend,
+        "CREATE TABLE integration_types (\
+         signed_value BIGINT NOT NULL,\
+         unsigned_value BIGINT UNSIGNED NOT NULL,\
+         float_value DOUBLE NOT NULL,\
+         text_value VARCHAR(32) NOT NULL,\
+         bytes_value VARBINARY(8) NOT NULL,\
+         datetime_value DATETIME(6) NOT NULL,\
+         time_value TIME(6) NOT NULL,\
+         null_value INT NULL\
+         )",
+    )
+    .await;
+    execute_sql(
+        &backend,
+        "INSERT INTO integration_types VALUES (\
+         -9, 10, 1.25, 'hello', X'00FF41', \
+         '2024-05-06 07:08:09.123456', '10:11:12.654321', NULL)",
+    )
+    .await;
+    let mut typed_stream = backend
+        .start_query("SELECT * FROM integration_types")
+        .await
+        .expect("typed query should start");
+    let typed_row = typed_stream
+        .next_row()
+        .await
+        .expect("typed row should decode")
+        .expect("typed row expected");
+    assert_eq!(typed_row.values[0], QueryValue::Int(-9));
+    assert_eq!(typed_row.values[1], QueryValue::UInt(10));
+    assert_eq!(typed_row.values[2], QueryValue::Float(1.25));
+    assert_eq!(typed_row.values[3], QueryValue::Text("hello".to_string()));
+    assert_eq!(typed_row.values[4], QueryValue::Bytes(vec![0, 255, 65]));
+    assert!(matches!(typed_row.values[5], QueryValue::DateTime(_)));
+    assert!(matches!(typed_row.values[6], QueryValue::Time(_)));
+    assert_eq!(typed_row.values[7], QueryValue::Null);
+    assert!(typed_stream
+        .next_row()
+        .await
+        .expect("typed stream should finish")
+        .is_none());
+
+    execute_sql(&backend, "DROP TABLE IF EXISTS integration_types").await;
     execute_sql(&backend, "DROP TABLE IF EXISTS integration_users").await;
     backend
         .disconnect()

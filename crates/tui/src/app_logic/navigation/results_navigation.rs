@@ -97,7 +97,7 @@ impl TuiApp {
             if row
                 .values
                 .iter()
-                .any(|value| value.to_ascii_lowercase().contains(&needle))
+                .any(|value| value.display_text().to_ascii_lowercase().contains(&needle))
             {
                 return Some(index);
             }

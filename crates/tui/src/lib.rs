@@ -17,6 +17,9 @@ use myr_adapters::export::{
     export_rows_to_json_with_options, ExportCompression, JsonExportFormat,
 };
 use myr_adapters::mysql::{MysqlConnectionBackend, MysqlDataBackend};
+use myr_application::{
+    AppCommand, AppErrorKind, AppSnapshot, ApplicationHandle, ConnectionStatus, OperationId,
+};
 use myr_core::actions_engine::{
     ActionContext, ActionId, ActionInvocation, ActionsEngine, AppView, SchemaSelection,
 };
@@ -24,7 +27,7 @@ use myr_core::audit_trail::{unix_timestamp_millis, AuditOutcome, AuditRecord, Fi
 use myr_core::bookmarks::{FileBookmarksStore, SavedBookmark};
 use myr_core::connection_manager::ConnectionManager;
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore, PasswordSource, TlsMode};
-use myr_core::query_runner::{CancellationToken, QueryRow, QueryRunner};
+use myr_core::query_runner::{CancellationToken, QueryRow, QueryRunner, QueryValue};
 use myr_core::results_buffer::ResultsRingBuffer;
 use myr_core::safe_mode::{assess_sql_safety, ConfirmationToken, GuardDecision, SafeModeGuard};
 use myr_core::schema_cache::{
@@ -61,6 +64,8 @@ const DEMO_SCHEMA_TABLES: [&str; 4] = ["users", "sessions", "playlists", "events
 pub enum TuiError {
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
+    #[error("application error: {0}")]
+    Application(String),
 }
 
 mod app_logic;
@@ -83,8 +88,16 @@ pub fn ui_name() -> &'static str {
 }
 
 pub fn run() -> Result<(), TuiError> {
+    run_internal(None)
+}
+
+pub fn run_with_application(application: ApplicationHandle) -> Result<(), TuiError> {
+    run_internal(Some(application))
+}
+
+fn run_internal(application: Option<ApplicationHandle>) -> Result<(), TuiError> {
     let mut terminal = setup_terminal()?;
-    let run_result = run_loop(&mut terminal);
+    let run_result = run_loop(&mut terminal, application);
     let restore_result = restore_terminal(&mut terminal);
 
     if let Err(error) = run_result {
@@ -117,8 +130,11 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), TuiError> {
-    let mut app = TuiApp::default();
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    application: Option<ApplicationHandle>,
+) -> Result<(), TuiError> {
+    let mut app = TuiApp::with_application(application);
     let mut last_tick = Instant::now();
 
     loop {

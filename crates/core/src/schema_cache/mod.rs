@@ -1,4 +1,3 @@
-mod relationships;
 mod service;
 mod types;
 
@@ -8,5 +7,6 @@ mod tests;
 pub use service::SchemaCacheService;
 pub use types::{
     ColumnSchema, DatabaseSchema, ForeignKeySchema, RelationshipDirection, SchemaBackend,
-    SchemaBackendError, SchemaCacheError, SchemaCatalog, TableRelationship, TableSchema,
+    SchemaBackendError, SchemaCacheError, SchemaCatalog, SchemaScope, TableRelationship,
+    TableSchema,
 };
