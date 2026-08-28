@@ -5,19 +5,155 @@ use std::sync::{
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::results_buffer::ResultsRingBuffer;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum QueryValue {
+    Null,
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    Text(String),
+    Bytes(Vec<u8>),
+    DateTime(String),
+    Time(String),
+}
+
+impl QueryValue {
+    #[must_use]
+    pub fn display_text(&self) -> String {
+        match self {
+            Self::Null => "NULL".to_string(),
+            Self::Int(value) => value.to_string(),
+            Self::UInt(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+            Self::Text(value) | Self::DateTime(value) | Self::Time(value) => value.clone(),
+            Self::Bytes(bytes) => {
+                let mut rendered = String::with_capacity(bytes.len().saturating_mul(2) + 2);
+                rendered.push_str("0x");
+                for byte in bytes {
+                    use std::fmt::Write as _;
+                    let _ = write!(rendered, "{byte:02x}");
+                }
+                rendered
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn typed_json_value(&self) -> serde_json::Value {
+        match self {
+            Self::Null => serde_json::Value::Null,
+            Self::Int(value) => (*value).into(),
+            Self::UInt(value) => (*value).into(),
+            Self::Float(value) => serde_json::Number::from_f64(*value)
+                .map_or(serde_json::Value::Null, serde_json::Value::Number),
+            Self::Text(value) | Self::DateTime(value) | Self::Time(value) => value.clone().into(),
+            Self::Bytes(value) => serde_json::json!({
+                "encoding": "hex",
+                "data": self.display_text().trim_start_matches("0x"),
+                "bytes": value.len(),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for QueryValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.display_text())
+    }
+}
+
+impl From<String> for QueryValue {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for QueryValue {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnMeta {
+    pub name: String,
+    pub schema: Option<String>,
+    pub table: Option<String>,
+    pub original_table: Option<String>,
+    pub original_name: Option<String>,
+    pub mysql_type: String,
+    pub flags: u16,
+    pub character_set: u16,
+    pub decimals: u8,
+}
+
+impl ColumnMeta {
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            schema: None,
+            table: None,
+            original_table: None,
+            original_name: None,
+            mysql_type: String::new(),
+            flags: 0,
+            character_set: 0,
+            decimals: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryRow {
-    pub values: Vec<String>,
+    pub values: Vec<QueryValue>,
 }
 
 impl QueryRow {
     #[must_use]
     pub fn new(values: Vec<String>) -> Self {
+        Self {
+            values: values.into_iter().map(QueryValue::Text).collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_values(values: Vec<QueryValue>) -> Self {
         Self { values }
+    }
+
+    #[must_use]
+    pub fn display_values(&self) -> Vec<String> {
+        self.values.iter().map(QueryValue::display_text).collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueryResultBatch {
+    pub columns: Vec<ColumnMeta>,
+    pub rows: Vec<QueryRow>,
+    pub rows_seen: u64,
+    pub rows_buffered: usize,
+    pub truncated: bool,
+}
+
+impl QueryResultBatch {
+    #[must_use]
+    pub fn new(columns: Vec<ColumnMeta>, rows: Vec<QueryRow>, rows_seen: u64) -> Self {
+        let rows_buffered = rows.len();
+        Self {
+            columns,
+            rows,
+            rows_seen,
+            rows_buffered,
+            truncated: rows_seen > u64::try_from(rows_buffered).unwrap_or(u64::MAX),
+        }
     }
 }
 
@@ -72,7 +208,7 @@ pub struct QueryExecutionSummary {
 
 #[async_trait]
 pub trait QueryRowStream: Send {
-    fn column_names(&self) -> Option<&[String]> {
+    fn columns(&self) -> Option<&[ColumnMeta]> {
         None
     }
 
@@ -217,14 +353,25 @@ mod tests {
         assert!(!summary.was_cancelled);
         assert_eq!(buffer.len(), 2);
         assert_eq!(
-            buffer.get(0).map(|row| &row.values[0]),
-            Some(&"2".to_string())
+            buffer.get(0).map(|row| row.values[0].display_text()),
+            Some("2".to_string())
         );
         assert_eq!(
-            buffer.get(1).map(|row| &row.values[0]),
-            Some(&"3".to_string())
+            buffer.get(1).map(|row| row.values[0].display_text()),
+            Some("3".to_string())
         );
         assert!(!cancel_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn typed_values_preserve_display_compatibility_and_json_types() {
+        use super::QueryValue;
+
+        assert_eq!(QueryValue::Null.display_text(), "NULL");
+        assert_eq!(QueryValue::Int(-3).display_text(), "-3");
+        assert_eq!(QueryValue::Bytes(vec![0, 255]).display_text(), "0x00ff");
+        assert_eq!(QueryValue::UInt(7).typed_json_value(), serde_json::json!(7));
+        assert_eq!(QueryValue::Null.typed_json_value(), serde_json::Value::Null);
     }
 
     #[tokio::test]

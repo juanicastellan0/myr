@@ -82,5 +82,27 @@ pub enum SchemaCacheError {
 
 #[async_trait]
 pub trait SchemaBackend {
-    async fn fetch_schema(&self) -> Result<SchemaCatalog, SchemaBackendError>;
+    async fn list_databases(&self) -> Result<Vec<String>, SchemaBackendError>;
+
+    async fn list_tables(&self, database: &str) -> Result<Vec<String>, SchemaBackendError>;
+
+    async fn list_columns(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnSchema>, SchemaBackendError>;
+
+    async fn list_relationships(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<TableRelationship>, SchemaBackendError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaScope {
+    All,
+    Databases,
+    Tables { database: String },
+    Table { database: String, table: String },
 }

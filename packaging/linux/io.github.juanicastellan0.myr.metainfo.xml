@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.juanicastellan0.myr</id>
+  <name>myr</name>
+  <summary>Fast MySQL and MariaDB explorer</summary>
+  <developer id="io.github.juanicastellan0">
+    <name>juanicastellan0</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>Explore schemas, run guarded SQL, inspect typed results, and export data from MySQL and MariaDB.</p>
+  </description>
+  <launchable type="desktop-id">io.github.juanicastellan0.myr.desktop</launchable>
+  <url type="homepage">https://github.com/juanicastellan0/myr</url>
+  <provides>
+    <binary>myr-gui</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.2.0-alpha.1" date="2026-08-28" type="development" />
+  </releases>
+</component>

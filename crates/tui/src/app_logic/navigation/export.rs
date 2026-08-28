@@ -7,7 +7,7 @@ impl TuiApp {
 
         let rows = (0..self.results.len())
             .filter_map(|index| self.results.get(index))
-            .map(|row| row.values.clone())
+            .map(QueryRow::display_values)
             .collect::<Vec<_>>();
         let file_path = export_file_path(match format {
             myr_core::actions_engine::ExportFormat::Csv => "csv",

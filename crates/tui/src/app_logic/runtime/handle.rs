@@ -136,6 +136,13 @@ impl TuiApp {
                 }
 
                 self.cancel_requested = true;
+                if let Some(application) = &self.application_handle {
+                    let _ = application.try_command(AppCommand::Cancel {
+                        operation_id: None,
+                    });
+                    self.status_line = "Cancelling query...".to_string();
+                    return;
+                }
                 if let Some(cancellation) = &self.query_cancellation {
                     cancellation.cancel();
                     self.status_line = "Cancelling query...".to_string();
@@ -196,10 +203,14 @@ impl TuiApp {
     pub(super) fn on_tick(&mut self) {
         self.loading_tick = self.loading_tick.wrapping_add(1);
         self.pane_flash_ticks = self.pane_flash_ticks.saturating_sub(1);
-        self.poll_connect_result();
-        self.poll_query_result();
+        if self.application_handle.is_some() {
+            self.sync_application_snapshot();
+        } else {
+            self.poll_connect_result();
+            self.poll_query_result();
+        }
 
-        if self.query_running && self.data_backend.is_none() {
+        if self.application_handle.is_none() && self.query_running && self.data_backend.is_none() {
             if self.query_ticks_remaining == 0 {
                 let audit_sql = self.inflight_query_sql.clone().unwrap_or_default();
                 self.query_running = false;
@@ -228,7 +239,9 @@ impl TuiApp {
             } else {
                 format!("Connecting... {spinner}")
             };
-        } else if self.query_running && self.query_result_rx.is_some() {
+        } else if self.query_running
+            && (self.application_handle.is_some() || self.query_result_rx.is_some())
+        {
             let spinner = spinner_char(self.loading_tick);
             self.status_line = if self.cancel_requested {
                 format!("Cancelling query... {spinner}")

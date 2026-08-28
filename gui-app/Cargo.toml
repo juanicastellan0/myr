@@ -1,0 +1,19 @@
+[package]
+name = "myr-gui-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "myr-gui"
+path = "src/main.rs"
+
+[dependencies]
+myr-adapters = { path = "../crates/adapters" }
+myr-application = { path = "../crates/application" }
+myr-core = { path = "../crates/core" }
+myr-gui = { path = "../crates/gui" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

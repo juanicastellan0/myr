@@ -2,12 +2,16 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use myr_application::{
+    AppErrorKind, ApplicationBackendError, ApplicationBackendFactory, ApplicationSession,
+};
 use myr_core::connection_manager::{BackendError, ConnectionBackend};
 use myr_core::profiles::{ConnectionProfile, PasswordSource, TlsMode};
-use myr_core::query_runner::{QueryBackend, QueryBackendError, QueryRow, QueryRowStream};
+use myr_core::query_runner::{
+    ColumnMeta, QueryBackend, QueryBackendError, QueryRow, QueryRowStream, QueryValue,
+};
 use myr_core::schema_cache::{
-    ColumnSchema, DatabaseSchema, ForeignKeySchema, SchemaBackend, SchemaBackendError,
-    SchemaCatalog, TableSchema,
+    ColumnSchema, RelationshipDirection, SchemaBackend, SchemaBackendError, TableRelationship,
 };
 use mysql_async::prelude::{Query, Queryable};
 use mysql_async::{
@@ -16,6 +20,32 @@ use mysql_async::{
 
 #[derive(Debug, Clone, Default)]
 pub struct MysqlConnectionBackend;
+
+#[derive(Debug, Clone, Default)]
+pub struct MysqlApplicationBackendFactory;
+
+#[async_trait]
+impl ApplicationBackendFactory for MysqlApplicationBackendFactory {
+    async fn connect(
+        &self,
+        profile: &ConnectionProfile,
+    ) -> Result<std::sync::Arc<dyn ApplicationSession>, ApplicationBackendError> {
+        let connection_backend = MysqlConnectionBackend;
+        let mut connection = connection_backend
+            .connect(profile)
+            .await
+            .map_err(|error| classify_application_error(&error.to_string()))?;
+        connection_backend
+            .ping(&mut connection)
+            .await
+            .map_err(|error| classify_application_error(&error.to_string()))?;
+        connection_backend
+            .disconnect(connection)
+            .await
+            .map_err(|error| classify_application_error(&error.to_string()))?;
+        Ok(std::sync::Arc::new(MysqlDataBackend::from_profile(profile)))
+    }
+}
 
 #[async_trait]
 impl ConnectionBackend for MysqlConnectionBackend {
@@ -55,97 +85,162 @@ impl MysqlDataBackend {
 }
 
 #[async_trait]
+impl ApplicationSession for MysqlDataBackend {
+    async fn list_databases(&self) -> Result<Vec<String>, ApplicationBackendError> {
+        SchemaBackend::list_databases(self)
+            .await
+            .map_err(|error| classify_application_error(&error.to_string()))
+    }
+
+    async fn list_tables(&self, database: &str) -> Result<Vec<String>, ApplicationBackendError> {
+        SchemaBackend::list_tables(self, database)
+            .await
+            .map_err(|error| classify_application_error(&error.to_string()))
+    }
+
+    async fn list_columns(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnSchema>, ApplicationBackendError> {
+        SchemaBackend::list_columns(self, database, table)
+            .await
+            .map_err(|error| classify_application_error(&error.to_string()))
+    }
+
+    async fn list_relationships(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<TableRelationship>, ApplicationBackendError> {
+        SchemaBackend::list_relationships(self, database, table)
+            .await
+            .map_err(|error| classify_application_error(&error.to_string()))
+    }
+
+    async fn start_query(
+        &self,
+        sql: &str,
+    ) -> Result<Box<dyn QueryRowStream + Send>, ApplicationBackendError> {
+        QueryBackend::start_query(self, sql)
+            .await
+            .map(|stream| Box::new(stream) as Box<dyn QueryRowStream + Send>)
+            .map_err(|error| classify_application_error(&error.to_string()))
+    }
+
+    async fn disconnect(&self) -> Result<(), ApplicationBackendError> {
+        MysqlDataBackend::disconnect(self)
+            .await
+            .map_err(|error| classify_application_error(&error.to_string()))
+    }
+}
+
+#[async_trait]
 impl SchemaBackend for MysqlDataBackend {
-    async fn fetch_schema(&self) -> Result<SchemaCatalog, SchemaBackendError> {
+    async fn list_databases(&self) -> Result<Vec<String>, SchemaBackendError> {
         let mut conn = self.pool.get_conn().await.map_err(to_schema_error)?;
         let databases = conn
             .query_map("SHOW DATABASES", |database: String| database)
             .await
             .map_err(to_schema_error)?;
-
-        let mut catalog_databases = Vec::with_capacity(databases.len());
-        for database in databases {
-            let tables = conn
-                .exec_map(
-                    "SELECT TABLE_NAME \
-                     FROM information_schema.TABLES \
-                     WHERE TABLE_SCHEMA = ? \
-                     ORDER BY TABLE_NAME",
-                    (database.clone(),),
-                    |table_name: String| table_name,
-                )
-                .await
-                .map_err(to_schema_error)?;
-
-            let mut catalog_tables = Vec::with_capacity(tables.len());
-            for table in tables {
-                let columns = conn
-                    .exec_map(
-                        "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT \
-                         FROM information_schema.COLUMNS \
-                         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
-                         ORDER BY ORDINAL_POSITION",
-                        (database.clone(), table.clone()),
-                        |(name, data_type, nullable, default_value): (
-                            String,
-                            String,
-                            String,
-                            Option<String>,
-                        )| ColumnSchema {
-                            name,
-                            data_type,
-                            nullable: nullable.eq_ignore_ascii_case("YES"),
-                            default_value,
-                        },
-                    )
-                    .await
-                    .map_err(to_schema_error)?;
-
-                let foreign_keys = conn
-                    .exec_map(
-                        "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \
-                         REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
-                         FROM information_schema.KEY_COLUMN_USAGE \
-                         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
-                           AND REFERENCED_TABLE_NAME IS NOT NULL \
-                         ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
-                        (database.clone(), table.clone()),
-                        |(
-                            constraint_name,
-                            column_name,
-                            referenced_database,
-                            referenced_table,
-                            referenced_column,
-                        ): (String, String, String, String, String)| {
-                            ForeignKeySchema {
-                                constraint_name,
-                                column_name,
-                                referenced_database,
-                                referenced_table,
-                                referenced_column,
-                            }
-                        },
-                    )
-                    .await
-                    .map_err(to_schema_error)?;
-
-                catalog_tables.push(TableSchema {
-                    name: table,
-                    columns,
-                    foreign_keys,
-                });
-            }
-
-            catalog_databases.push(DatabaseSchema {
-                name: database,
-                tables: catalog_tables,
-            });
-        }
-
         conn.disconnect().await.map_err(to_schema_error)?;
-        Ok(SchemaCatalog {
-            databases: catalog_databases,
-        })
+        Ok(databases)
+    }
+
+    async fn list_tables(&self, database: &str) -> Result<Vec<String>, SchemaBackendError> {
+        let mut conn = self.pool.get_conn().await.map_err(to_schema_error)?;
+        let tables = conn
+            .exec_map(
+                "SELECT TABLE_NAME \
+                 FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA = ? \
+                 ORDER BY TABLE_NAME",
+                (database,),
+                |table_name: String| table_name,
+            )
+            .await
+            .map_err(to_schema_error)?;
+        conn.disconnect().await.map_err(to_schema_error)?;
+        Ok(tables)
+    }
+
+    async fn list_columns(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<ColumnSchema>, SchemaBackendError> {
+        let mut conn = self.pool.get_conn().await.map_err(to_schema_error)?;
+        let columns = conn
+            .exec_map(
+                "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT \
+                 FROM information_schema.COLUMNS \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                 ORDER BY ORDINAL_POSITION",
+                (database, table),
+                |(name, data_type, nullable, default_value): (
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                )| ColumnSchema {
+                    name,
+                    data_type,
+                    nullable: nullable.eq_ignore_ascii_case("YES"),
+                    default_value,
+                },
+            )
+            .await
+            .map_err(to_schema_error)?;
+        conn.disconnect().await.map_err(to_schema_error)?;
+        Ok(columns)
+    }
+
+    async fn list_relationships(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<TableRelationship>, SchemaBackendError> {
+        let mut conn = self.pool.get_conn().await.map_err(to_schema_error)?;
+        let relationships = conn
+            .exec_map(
+                "SELECT 'outbound', CONSTRAINT_NAME, COLUMN_NAME, \
+                        REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+                 FROM information_schema.KEY_COLUMN_USAGE \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                   AND REFERENCED_TABLE_NAME IS NOT NULL \
+                 UNION ALL \
+                 SELECT 'inbound', CONSTRAINT_NAME, REFERENCED_COLUMN_NAME, \
+                        TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME \
+                 FROM information_schema.KEY_COLUMN_USAGE \
+                 WHERE REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ? \
+                 ORDER BY 4, 5, 6, 2",
+                (database, table, database, table),
+                |(
+                    direction,
+                    constraint_name,
+                    source_column,
+                    related_database,
+                    related_table,
+                    related_column,
+                ): (String, String, String, String, String, String)| {
+                    TableRelationship {
+                        direction: if direction == "outbound" {
+                            RelationshipDirection::Outbound
+                        } else {
+                            RelationshipDirection::Inbound
+                        },
+                        constraint_name,
+                        source_column,
+                        related_database,
+                        related_table,
+                        related_column,
+                    }
+                },
+            )
+            .await
+            .map_err(to_schema_error)?;
+        conn.disconnect().await.map_err(to_schema_error)?;
+        Ok(relationships)
     }
 }
 
@@ -153,28 +248,38 @@ impl SchemaBackend for MysqlDataBackend {
 pub struct MysqlStreamingRowStream {
     stream: Option<ResultSetStream<'static, 'static, 'static, Row, TextProtocol>>,
     cancelled: bool,
-    column_names: Vec<String>,
+    columns: Vec<ColumnMeta>,
 }
 
 impl MysqlStreamingRowStream {
     fn new(stream: ResultSetStream<'static, 'static, 'static, Row, TextProtocol>) -> Self {
-        let column_names = stream
+        let columns = stream
             .columns_ref()
             .iter()
-            .map(|column| column.name_str().into_owned())
+            .map(|column| ColumnMeta {
+                name: column.name_str().into_owned(),
+                schema: non_empty_owned(column.schema_str().into_owned()),
+                table: non_empty_owned(column.table_str().into_owned()),
+                original_table: non_empty_owned(column.org_table_str().into_owned()),
+                original_name: non_empty_owned(column.org_name_str().into_owned()),
+                mysql_type: format!("{:?}", column.column_type()),
+                flags: column.flags().bits(),
+                character_set: column.character_set(),
+                decimals: column.decimals(),
+            })
             .collect();
         Self {
             stream: Some(stream),
             cancelled: false,
-            column_names,
+            columns,
         }
     }
 }
 
 #[async_trait]
 impl QueryRowStream for MysqlStreamingRowStream {
-    fn column_names(&self) -> Option<&[String]> {
-        Some(&self.column_names)
+    fn columns(&self) -> Option<&[ColumnMeta]> {
+        Some(&self.columns)
     }
 
     async fn next_row(&mut self) -> Result<Option<QueryRow>, QueryBackendError> {
@@ -186,7 +291,7 @@ impl QueryRowStream for MysqlStreamingRowStream {
         };
 
         match stream.next().await {
-            Some(Ok(row)) => row_to_query_row(row).map(Some),
+            Some(Ok(row)) => row_to_query_row(row, &self.columns).map(Some),
             Some(Err(error)) => Err(to_query_error(error)),
             None => {
                 self.stream = None;
@@ -322,6 +427,10 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     })
 }
 
+fn non_empty_owned(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn load_keyring_password(profile: &ConnectionProfile) -> Option<String> {
     let entry = keyring_entry(profile)?;
@@ -353,43 +462,105 @@ fn keyring_entry(profile: &ConnectionProfile) -> Option<keyring::Entry> {
     keyring::Entry::new(service, account).ok()
 }
 
-fn row_to_query_row(row: Row) -> Result<QueryRow, QueryBackendError> {
-    row_values_to_strings(row.unwrap_raw()).map(QueryRow::new)
+fn row_to_query_row(row: Row, columns: &[ColumnMeta]) -> Result<QueryRow, QueryBackendError> {
+    row_values_to_typed(row.unwrap_raw(), columns).map(QueryRow::from_values)
 }
 
-fn row_values_to_strings(values: Vec<Option<Value>>) -> Result<Vec<String>, QueryBackendError> {
+fn row_values_to_typed(
+    values: Vec<Option<Value>>,
+    columns: &[ColumnMeta],
+) -> Result<Vec<QueryValue>, QueryBackendError> {
     values
         .into_iter()
         .enumerate()
         .map(|(index, value)| {
-            value.map(mysql_value_to_string).ok_or_else(|| {
-                QueryBackendError::new(format!(
-                    "row decoding failed: missing value at column index {index}"
-                ))
-            })
+            value
+                .map(|value| mysql_value_to_query_value(value, columns.get(index)))
+                .ok_or_else(|| {
+                    QueryBackendError::new(format!(
+                        "row decoding failed: missing value at column index {index}"
+                    ))
+                })
         })
         .collect()
 }
 
-fn mysql_value_to_string(value: Value) -> String {
+fn mysql_value_to_query_value(value: Value, column: Option<&ColumnMeta>) -> QueryValue {
     match value {
-        Value::NULL => "NULL".to_string(),
-        Value::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Value::Int(value) => value.to_string(),
-        Value::UInt(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::Double(value) => value.to_string(),
-        Value::Date(year, month, day, hour, minute, second, micros) => format!(
-            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{:06}",
-            micros
-        ),
+        Value::NULL => QueryValue::Null,
+        Value::Bytes(bytes) => bytes_to_query_value(bytes, column),
+        Value::Int(value) => QueryValue::Int(value),
+        Value::UInt(value) => QueryValue::UInt(value),
+        Value::Float(value) => QueryValue::Float(f64::from(value)),
+        Value::Double(value) => QueryValue::Float(value),
+        Value::Date(year, month, day, hour, minute, second, micros) => {
+            QueryValue::DateTime(format!(
+                "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{:06}",
+                micros
+            ))
+        }
         Value::Time(is_negative, days, hours, minutes, seconds, micros) => {
             let sign = if is_negative { "-" } else { "" };
-            format!(
+            QueryValue::Time(format!(
                 "{sign}{days:03} {hours:02}:{minutes:02}:{seconds:02}.{:06}",
                 micros
-            )
+            ))
         }
+    }
+}
+
+fn bytes_to_query_value(bytes: Vec<u8>, column: Option<&ColumnMeta>) -> QueryValue {
+    let Some(column) = column else {
+        return QueryValue::Text(String::from_utf8_lossy(&bytes).into_owned());
+    };
+    let rendered = std::str::from_utf8(&bytes).ok();
+    if matches!(
+        column.mysql_type.as_str(),
+        "MYSQL_TYPE_TINY"
+            | "MYSQL_TYPE_SHORT"
+            | "MYSQL_TYPE_LONG"
+            | "MYSQL_TYPE_LONGLONG"
+            | "MYSQL_TYPE_INT24"
+            | "MYSQL_TYPE_YEAR"
+    ) {
+        if column.flags & 32 != 0 {
+            if let Some(value) = rendered.and_then(|value| value.parse::<u64>().ok()) {
+                return QueryValue::UInt(value);
+            }
+        } else if let Some(value) = rendered.and_then(|value| value.parse::<i64>().ok()) {
+            return QueryValue::Int(value);
+        }
+    }
+    if matches!(
+        column.mysql_type.as_str(),
+        "MYSQL_TYPE_FLOAT" | "MYSQL_TYPE_DOUBLE" | "MYSQL_TYPE_DECIMAL" | "MYSQL_TYPE_NEWDECIMAL"
+    ) {
+        if let Some(value) = rendered.and_then(|value| value.parse::<f64>().ok()) {
+            return QueryValue::Float(value);
+        }
+    }
+    if matches!(
+        column.mysql_type.as_str(),
+        "MYSQL_TYPE_DATE"
+            | "MYSQL_TYPE_NEWDATE"
+            | "MYSQL_TYPE_DATETIME"
+            | "MYSQL_TYPE_DATETIME2"
+            | "MYSQL_TYPE_TIMESTAMP"
+            | "MYSQL_TYPE_TIMESTAMP2"
+    ) {
+        return QueryValue::DateTime(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    if matches!(
+        column.mysql_type.as_str(),
+        "MYSQL_TYPE_TIME" | "MYSQL_TYPE_TIME2"
+    ) {
+        return QueryValue::Time(String::from_utf8_lossy(&bytes).into_owned());
+    }
+
+    if column.character_set == 63 {
+        QueryValue::Bytes(bytes)
+    } else {
+        QueryValue::Text(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -405,33 +576,88 @@ fn to_query_error(error: mysql_async::Error) -> QueryBackendError {
     QueryBackendError::new(error.to_string())
 }
 
+fn classify_application_error(message: &str) -> ApplicationBackendError {
+    let normalized = message.to_ascii_lowercase();
+    let kind = if normalized.contains("access denied")
+        || normalized.contains("authentication")
+        || normalized.contains("password")
+    {
+        AppErrorKind::Authentication
+    } else if normalized.contains("tls")
+        || normalized.contains("ssl")
+        || normalized.contains("certificate")
+    {
+        AppErrorKind::Tls
+    } else if normalized.contains("timeout") || normalized.contains("timed out") {
+        AppErrorKind::Timeout
+    } else {
+        AppErrorKind::Connection
+    };
+    ApplicationBackendError::new(kind, message)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use myr_core::profiles::{ConnectionProfile, TlsMode};
+    use myr_core::query_runner::{ColumnMeta, QueryValue};
     use mysql_async::Value;
 
     use super::{
-        client_identity_from_profile, mysql_value_to_string, opts_from_profile,
-        profile_requests_tls, row_values_to_strings,
+        client_identity_from_profile, mysql_value_to_query_value, opts_from_profile,
+        profile_requests_tls, row_values_to_typed,
     };
 
     #[test]
     fn value_conversion_is_human_readable() {
-        assert_eq!(mysql_value_to_string(Value::NULL), "NULL");
+        let text_column = ColumnMeta::new("value");
         assert_eq!(
-            mysql_value_to_string(Value::Bytes(b"hello".to_vec())),
-            "hello".to_string()
+            mysql_value_to_query_value(Value::NULL, None),
+            QueryValue::Null
         );
-        assert_eq!(mysql_value_to_string(Value::Int(-8)), "-8");
-        assert_eq!(mysql_value_to_string(Value::UInt(8)), "8");
+        assert_eq!(
+            mysql_value_to_query_value(Value::Bytes(b"hello".to_vec()), Some(&text_column)),
+            QueryValue::Text("hello".to_string())
+        );
+        assert_eq!(
+            mysql_value_to_query_value(Value::Int(-8), None),
+            QueryValue::Int(-8)
+        );
+        assert_eq!(
+            mysql_value_to_query_value(Value::UInt(8), None),
+            QueryValue::UInt(8)
+        );
+
+        let mut integer_column = ColumnMeta::new("count");
+        integer_column.mysql_type = "MYSQL_TYPE_LONGLONG".to_string();
+        integer_column.character_set = 63;
+        assert_eq!(
+            mysql_value_to_query_value(Value::Bytes(b"42".to_vec()), Some(&integer_column)),
+            QueryValue::Int(42)
+        );
+        integer_column.flags = 32;
+        assert_eq!(
+            mysql_value_to_query_value(Value::Bytes(b"42".to_vec()), Some(&integer_column)),
+            QueryValue::UInt(42)
+        );
+
+        let mut datetime_column = ColumnMeta::new("created_at");
+        datetime_column.mysql_type = "MYSQL_TYPE_DATETIME".to_string();
+        datetime_column.character_set = 63;
+        assert!(matches!(
+            mysql_value_to_query_value(
+                Value::Bytes(b"2024-05-06 07:08:09".to_vec()),
+                Some(&datetime_column)
+            ),
+            QueryValue::DateTime(_)
+        ));
     }
 
     #[test]
     fn row_value_mapping_reports_missing_columns_without_panicking() {
-        let error = row_values_to_strings(vec![Some(Value::Int(1)), None])
+        let error = row_values_to_typed(vec![Some(Value::Int(1)), None], &[])
             .expect_err("missing row values should return an error");
         assert_eq!(
             error.to_string(),

@@ -330,13 +330,13 @@ pub(crate) fn extract_key_bounds(
     let first = results
         .get(0)
         .and_then(|row| row.values.get(key_index))
-        .cloned();
+        .map(QueryValue::display_text);
     let last = results
         .len()
         .checked_sub(1)
         .and_then(|index| results.get(index))
         .and_then(|row| row.values.get(key_index))
-        .cloned();
+        .map(QueryValue::display_text);
     (first, last)
 }
 

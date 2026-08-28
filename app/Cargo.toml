@@ -9,8 +9,9 @@ default-run = "myr-app"
 myr-core = { path = "../crates/core" }
 myr-tui = { path = "../crates/tui" }
 myr-adapters = { path = "../crates/adapters" }
+myr-application = { path = "../crates/application" }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
 [dev-dependencies]
 tempfile = "3"

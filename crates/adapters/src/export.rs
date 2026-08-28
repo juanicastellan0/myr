@@ -4,6 +4,7 @@ use std::path::Path;
 
 use flate2::write::GzEncoder;
 use flate2::Compression as GzipCompression;
+use myr_core::query_runner::QueryValue;
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 
@@ -163,6 +164,52 @@ pub fn export_rows_to_json_with_options(
     Ok(rows.len())
 }
 
+pub fn export_typed_rows_to_json_with_options(
+    path: &Path,
+    headers: &[String],
+    rows: &[Vec<QueryValue>],
+    format: JsonExportFormat,
+    compression: ExportCompression,
+) -> Result<usize, ExportError> {
+    let mut writer = OutputWriter::create(path, compression)?;
+
+    match format {
+        JsonExportFormat::Array => {
+            writer
+                .write_all(b"[")
+                .map_err(|source| write_error(path, source))?;
+            for (index, row) in rows.iter().enumerate() {
+                if index > 0 {
+                    writer
+                        .write_all(b",")
+                        .map_err(|source| write_error(path, source))?;
+                }
+                serde_json::to_writer(
+                    &mut writer,
+                    &Value::Object(typed_row_as_json_object(headers, row)),
+                )?;
+            }
+            writer
+                .write_all(b"]\n")
+                .map_err(|source| write_error(path, source))?;
+        }
+        JsonExportFormat::JsonLines => {
+            for row in rows {
+                serde_json::to_writer(
+                    &mut writer,
+                    &Value::Object(typed_row_as_json_object(headers, row)),
+                )?;
+                writer
+                    .write_all(b"\n")
+                    .map_err(|source| write_error(path, source))?;
+            }
+        }
+    }
+
+    writer.finish(path)?;
+    Ok(rows.len())
+}
+
 fn row_as_json_object(headers: &[String], row: &[String]) -> Map<String, Value> {
     let mut object = Map::with_capacity(headers.len());
     for (column_index, header) in headers.iter().enumerate() {
@@ -172,6 +219,24 @@ fn row_as_json_object(headers: &[String], row: &[String]) -> Map<String, Value> 
         object.insert(header.clone(), value);
     }
     object
+}
+
+fn typed_row_as_json_object(headers: &[String], row: &[QueryValue]) -> Map<String, Value> {
+    let mut object = Map::with_capacity(headers.len());
+    for (column_index, header) in headers.iter().enumerate() {
+        let value = row
+            .get(column_index)
+            .map_or(Value::Null, QueryValue::typed_json_value);
+        object.insert(header.clone(), value);
+    }
+    object
+}
+
+fn write_error(path: &Path, source: std::io::Error) -> ExportError {
+    ExportError::Write {
+        path: path.display().to_string(),
+        source,
+    }
 }
 
 fn csv_escape(value: &str) -> String {
@@ -244,11 +309,13 @@ mod tests {
     use std::io::Read;
 
     use flate2::read::GzDecoder;
+    use myr_core::query_runner::QueryValue;
     use tempfile::TempDir;
 
     use super::{
         export_rows_to_csv, export_rows_to_csv_with_options, export_rows_to_json,
-        export_rows_to_json_with_options, ExportCompression, JsonExportFormat,
+        export_rows_to_json_with_options, export_typed_rows_to_json_with_options,
+        ExportCompression, JsonExportFormat,
     };
 
     #[test]
@@ -339,5 +406,25 @@ mod tests {
             serde_json::from_str(lines[1]).expect("second line should be json");
         assert_eq!(first["id"], "10");
         assert_eq!(second["value"], "next");
+    }
+
+    #[test]
+    fn typed_json_preserves_null_and_numeric_values() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let path = temp_dir.path().join("typed.jsonl");
+        let headers = vec!["id".to_string(), "missing".to_string()];
+        let rows = vec![vec![QueryValue::UInt(7), QueryValue::Null]];
+
+        export_typed_rows_to_json_with_options(
+            &path,
+            &headers,
+            &rows,
+            JsonExportFormat::JsonLines,
+            ExportCompression::None,
+        )
+        .expect("typed export should succeed");
+
+        let rendered = fs::read_to_string(path).expect("typed export should be readable");
+        assert_eq!(rendered, "{\"id\":7,\"missing\":null}\n");
     }
 }

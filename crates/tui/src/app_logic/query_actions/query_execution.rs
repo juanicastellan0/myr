@@ -97,6 +97,24 @@ impl TuiApp {
     }
 
     fn execute_sql_with_guard(&mut self, sql: String) {
+        if let Some(application) = self.application_handle.clone() {
+            self.record_query_history(&sql);
+            self.inflight_query_sql = Some(sql.clone());
+            self.query_editor_text = sql.clone();
+            self.query_cursor = self.query_editor_text.len();
+            self.error_panel = None;
+            self.cancel_requested = false;
+            self.has_results = false;
+            self.results = ResultsRingBuffer::new(RESULT_BUFFER_CAPACITY);
+            if let Err(error) = application.try_command(AppCommand::ExecuteSql { sql }) {
+                self.status_line = format!("Query failed to start: {error:?}");
+                return;
+            }
+            self.query_running = true;
+            self.status_line = "Running query...".to_string();
+            return;
+        }
+
         if self.current_profile_read_only() {
             let assessment = assess_sql_safety(&sql);
             if !assessment.is_safe_read_only() {

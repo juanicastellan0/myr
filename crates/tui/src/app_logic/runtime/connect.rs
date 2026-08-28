@@ -56,6 +56,16 @@ impl TuiApp {
             )
         };
 
+        if let Some(application) = &self.application_handle {
+            if let Err(error) = application.try_command(AppCommand::ConnectProfile {
+                profile: profile.clone(),
+            }) {
+                self.connect_requested = false;
+                self.status_line = format!("Connect failed: {error:?}");
+            }
+            return;
+        }
+
         let _connect_worker = thread::spawn(move || {
             let _ = tx.send(run_connect_worker(profile));
         });

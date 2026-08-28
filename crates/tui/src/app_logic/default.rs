@@ -1,10 +1,32 @@
 impl Default for TuiApp {
     fn default() -> Self {
+        Self::with_application(None)
+    }
+}
+
+impl TuiApp {
+    pub(crate) fn with_application(application_handle: Option<ApplicationHandle>) -> Self {
         let demo_columns = demo_column_schemas();
+        let owns_legacy_stores = application_handle.is_none();
+        let wizard_form = application_handle
+            .as_ref()
+            .and_then(|application| {
+                let snapshot = application.snapshot();
+                snapshot
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.is_default)
+                    .or_else(|| snapshot.profiles.iter().find(|profile| profile.quick_reconnect))
+                    .or_else(|| snapshot.profiles.first())
+                    .map(wizard_form_from_profile)
+            })
+            .unwrap_or_else(startup_wizard_form);
         Self {
+            application_handle,
+            application_confirmation: None,
             actions: ActionsEngine::new(),
             pane: Pane::ConnectionWizard,
-            wizard_form: startup_wizard_form(),
+            wizard_form,
             connected_profile: None,
             last_connection_latency: None,
             data_backend: None,
@@ -76,9 +98,9 @@ impl Default for TuiApp {
             pane_flash_ticks: 0,
             exit_confirmation: false,
             status_line: "Select a field with Up/Down, press E to edit, F5 to connect".to_string(),
-            audit_trail: default_audit_trail(),
+            audit_trail: owns_legacy_stores.then(default_audit_trail).flatten(),
             bookmark_store: default_bookmark_store(),
-            profile_store: default_profile_store(),
+            profile_store: owns_legacy_stores.then(default_profile_store).flatten(),
             bookmark_cycle_index: 0,
             manager_lane: ManagerLane::Profiles,
             manager_profile_cursor: 0,

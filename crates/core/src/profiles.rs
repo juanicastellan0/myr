@@ -1,8 +1,11 @@
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 const PROFILES_FORMAT_VERSION: u32 = 1;
@@ -122,6 +125,12 @@ pub enum ProfilesError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to lock profiles file at {path}: {source}")]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -231,36 +240,7 @@ impl FileProfilesStore {
 
     pub fn load_from_path(path: impl Into<PathBuf>) -> Result<Self, ProfilesError> {
         let path = path.into();
-        if !path.exists() {
-            return Ok(Self {
-                path,
-                profiles: Vec::new(),
-            });
-        }
-
-        let raw = fs::read_to_string(&path).map_err(|source| ProfilesError::Read {
-            path: path.clone(),
-            source,
-        })?;
-
-        if raw.trim().is_empty() {
-            return Ok(Self {
-                path,
-                profiles: Vec::new(),
-            });
-        }
-
-        let (mut doc, migrated) =
-            decode_profiles_document(&raw).map_err(|source| ProfilesError::Parse {
-                path: path.clone(),
-                source,
-            })?;
-        doc.normalize();
-
-        let store = Self {
-            path,
-            profiles: doc.profiles,
-        };
+        let (store, migrated) = load_profiles_unlocked(path)?;
 
         if migrated {
             store.persist()?;
@@ -339,22 +319,122 @@ impl FileProfilesStore {
     }
 
     pub fn persist(&self) -> Result<(), ProfilesError> {
-        if let Some(parent_dir) = self.path.parent() {
-            fs::create_dir_all(parent_dir).map_err(|source| ProfilesError::CreateDir {
-                path: parent_dir.to_path_buf(),
-                source,
-            })?;
-        }
+        let lock = lock_profiles_file(&self.path)?;
+        let result = self.persist_atomic_unlocked();
+        let _ = FileExt::unlock(&lock);
+        result
+    }
+
+    pub fn update_locked<R>(
+        &mut self,
+        update: impl FnOnce(&mut Self) -> R,
+    ) -> Result<R, ProfilesError> {
+        let lock = lock_profiles_file(&self.path)?;
+        let (mut latest, _) = load_profiles_unlocked(self.path.clone())?;
+        let result = update(&mut latest);
+        latest.persist_atomic_unlocked()?;
+        *self = latest;
+        let _ = FileExt::unlock(&lock);
+        Ok(result)
+    }
+
+    fn persist_atomic_unlocked(&self) -> Result<(), ProfilesError> {
+        let parent_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent_dir).map_err(|source| ProfilesError::CreateDir {
+            path: parent_dir.to_path_buf(),
+            source,
+        })?;
 
         let doc = ProfilesDocument::new(self.profiles.clone());
         let rendered =
             toml::to_string_pretty(&doc).map_err(|source| ProfilesError::Serialize { source })?;
-
-        fs::write(&self.path, rendered).map_err(|source| ProfilesError::Write {
-            path: self.path.clone(),
-            source,
-        })
+        let mut temporary =
+            NamedTempFile::new_in(parent_dir).map_err(|source| ProfilesError::Write {
+                path: self.path.clone(),
+                source,
+            })?;
+        temporary
+            .write_all(rendered.as_bytes())
+            .and_then(|()| temporary.as_file().sync_all())
+            .map_err(|source| ProfilesError::Write {
+                path: self.path.clone(),
+                source,
+            })?;
+        temporary
+            .persist(&self.path)
+            .map_err(|error| ProfilesError::Write {
+                path: self.path.clone(),
+                source: error.error,
+            })?;
+        Ok(())
     }
+}
+
+fn load_profiles_unlocked(path: PathBuf) -> Result<(FileProfilesStore, bool), ProfilesError> {
+    if !path.exists() {
+        return Ok((
+            FileProfilesStore {
+                path,
+                profiles: Vec::new(),
+            },
+            false,
+        ));
+    }
+
+    let raw = fs::read_to_string(&path).map_err(|source| ProfilesError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    if raw.trim().is_empty() {
+        return Ok((
+            FileProfilesStore {
+                path,
+                profiles: Vec::new(),
+            },
+            false,
+        ));
+    }
+
+    let (mut doc, migrated) =
+        decode_profiles_document(&raw).map_err(|source| ProfilesError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+    doc.normalize();
+    Ok((
+        FileProfilesStore {
+            path,
+            profiles: doc.profiles,
+        },
+        migrated,
+    ))
+}
+
+fn lock_profiles_file(path: &Path) -> Result<File, ProfilesError> {
+    let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent_dir).map_err(|source| ProfilesError::CreateDir {
+        path: parent_dir.to_path_buf(),
+        source,
+    })?;
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let lock_path = PathBuf::from(lock_path);
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| ProfilesError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    lock.lock_exclusive()
+        .map_err(|source| ProfilesError::Lock {
+            path: lock_path,
+            source,
+        })?;
+    Ok(lock)
 }
 
 pub fn default_profiles_path() -> Result<PathBuf, ProfilesError> {
@@ -491,6 +571,37 @@ mod tests {
         store.persist().expect("failed to persist store");
 
         let raw = fs::read_to_string(path).expect("failed to read persisted profile file");
+        assert!(raw.contains("version = 1"));
+    }
+
+    #[test]
+    fn locked_updates_reload_latest_state_and_replace_atomically() {
+        let temp_dir = TempDir::new().expect("failed to create temp directory");
+        let path = temp_profiles_path(&temp_dir);
+        let mut first = FileProfilesStore::load_from_path(&path).expect("first store should load");
+        let mut second =
+            FileProfilesStore::load_from_path(&path).expect("second store should load");
+
+        first
+            .update_locked(|store| {
+                store.upsert_profile(ConnectionProfile::new("first", "first.internal", "reader"));
+            })
+            .expect("first locked update should persist");
+        second
+            .update_locked(|store| {
+                store.upsert_profile(ConnectionProfile::new(
+                    "second",
+                    "second.internal",
+                    "reader",
+                ));
+            })
+            .expect("second locked update should merge latest state");
+
+        let reloaded = FileProfilesStore::load_from_path(&path).expect("store should reload");
+        assert!(reloaded.profile("first").is_some());
+        assert!(reloaded.profile("second").is_some());
+        assert!(!path.with_extension("toml.part").exists());
+        let raw = fs::read_to_string(path).expect("atomic destination should be readable");
         assert!(raw.contains("version = 1"));
     }
 

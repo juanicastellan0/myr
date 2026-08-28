@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=myr
+GenericName=MySQL Explorer
+Comment=Fast MySQL and MariaDB explorer
+Exec=myr-gui
+Icon=io.github.juanicastellan0.myr
+Terminal=false
+Categories=Development;Database;
+Keywords=MySQL;MariaDB;SQL;Database;
+StartupNotify=true
