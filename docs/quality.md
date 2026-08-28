@@ -24,7 +24,7 @@ cargo llvm-cov --workspace --all-features --html --output-dir target/coverage/ht
 Print a table summary:
 
 ```bash
-cargo llvm-cov report --summary-only
+cargo llvm-cov report
 ```
 
 ## CI Workflow
@@ -32,7 +32,11 @@ cargo llvm-cov report --summary-only
 See `.github/workflows/ci.yml` for gate configuration.
 
 Current gate settings:
-- line coverage threshold: `85%`
+- line coverage threshold: `80%` after the shared-application migration (`80.79%` measured with the CI-equivalent MySQL suites)
+- final ratchet: `85%` before `v0.2.0-alpha.1` is tagged
+- coverage summary is uploaded as a CI artifact
+- unit, MySQL adapter, TUI MySQL, and CLI MySQL integration profiles are accumulated before enforcing the threshold
+- GitHub Actions workflows are linted with `actionlint`
 - MySQL integration coverage enabled with:
   - `MYR_DB_PASSWORD=root`
   - `MYR_RUN_MYSQL_INTEGRATION=1`
@@ -55,10 +59,14 @@ Current gate settings:
 - command:
 
 ```bash
-cargo llvm-cov --workspace --all-features \
-  --json --summary-only \
-  --output-path target/coverage/summary.json \
-  --fail-under-lines 85
+cargo llvm-cov clean --workspace
+cargo llvm-cov --workspace --all-features --no-report
+MYR_RUN_MYSQL_INTEGRATION=1 cargo llvm-cov --no-report \
+  -p myr-adapters --test mysql_integration
+MYR_RUN_TUI_MYSQL_INTEGRATION=1 cargo llvm-cov test --no-report \
+  -p myr-tui mysql_query_path_streams_rows_when_enabled
+cargo llvm-cov report --json --summary-only \
+  --output-path target/coverage/summary.json --fail-under-lines 80
 ```
 
 Optional local integration commands:

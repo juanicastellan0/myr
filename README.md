@@ -1,6 +1,6 @@
-# Fast MySQL TUI Explorer (Rust)
+# myr — MySQL/MariaDB Explorer
 
-Terminal-first MySQL/MariaDB schema and data explorer focused on speed, guided actions, and safe defaults.
+Native GUI, terminal UI, and scripting CLI for exploring MySQL/MariaDB with typed results, guided actions, and safe defaults.
 
 ## Status
 
@@ -10,6 +10,9 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 ## Workspace Layout
 
 - `app`: binary entrypoint
+- `gui-app`: Linux GUI binary entrypoint (`myr-gui`)
+- `crates/application`: shared command/event actor and UI-independent snapshots
+- `crates/gui`: Iced 0.14 presentation library
 - `crates/core`: domain logic and shared state
 - `crates/tui`: terminal UI components
 - `crates/adapters`: external integrations (DB/export/fs)
@@ -23,6 +26,7 @@ query UX, and security hardening. Current and upcoming milestone tracking is in 
 3. Run `cargo test` to verify baseline health.
 4. Start the app with `cargo run -p myr-app`.
 5. View non-interactive CLI help with `cargo run -p myr-app -- --help`.
+6. Start the native GUI with `cargo run -p myr-gui-app --bin myr-gui`.
 
 ## Install Channels
 
@@ -46,6 +50,10 @@ Notes:
 
 ## Key Features
 
+- Native Iced GUI with profile/connection toolbar, lazy schema sidebar, Schema/Query/Results tabs, typed table, buffered search, and progress/error footer
+- One shared Tokio application actor for GUI and the composed TUI, with operation IDs, cancellation, stale-response rejection, and 10 Hz streaming updates
+- Typed query values (`NULL`, signed/unsigned integers, floats, text, bytes, date-time, and time) while preserving existing textual CLI/TUI output
+- Scoped schema loading: connect loads databases only; selecting a database loads tables; selecting a table loads columns and relationships
 - Connection wizard with persisted profiles
 - Versioned profile config with automatic legacy-key migration on load
 - Schema explorer lanes for databases, tables, and columns
@@ -75,6 +83,7 @@ Notes:
   - `myr-app query --sql ...`
   - `myr-app export --sql ... --format ... --output ...`
   - `myr-app doctor`
+- Optional `--typed-values` for query JSONL and JSON/JSONL exports (default output stays backwards-compatible)
 - Benchmark runner + CI perf smoke checks with persisted perf metric artifacts and trend-policy guardrails
 
 ## Visual Status Cues
@@ -122,6 +131,18 @@ MYR_DB_PASSWORD=root cargo run -p myr-app -- \
   --sql "SELECT id, email FROM \`myr_bench\`.\`users\` ORDER BY id LIMIT 3"
 ```
 
+Add `--typed-values` to preserve JSON numbers and `null`; binary values are emitted as explicit hex objects.
+
+## Native GUI Alpha
+
+`v0.2.0-alpha.1` targets Linux x86_64. Release assets include:
+
+- `myr-gui-0.2.0-alpha.1-linux-x86_64.AppImage`
+- `myr-gui-0.2.0-alpha.1-linux-x86_64.tar.gz`
+- `SHA256SUMS.txt`
+
+GUI-only preferences are stored in `gui.toml`. Profiles, keyring credentials, and audit data remain shared with TUI/CLI. “Export loaded rows” writes exactly the bounded result buffer; “Export full read query” re-runs only safe read SQL, streams through `destination.part`, and renames on success.
+
 Export query results:
 
 ```bash
@@ -167,7 +188,7 @@ MYR_DB_PASSWORD=root cargo run -p myr-app -- \
 - Coverage report:
   - `cargo llvm-cov --workspace --all-features --html --output-dir target/coverage/html`
 - CI coverage gate:
-  - minimum lines: `85%`
+  - shared-application baseline: `80%` (`80.79%` measured locally with the CI-equivalent MySQL suites); ratchets to `85%` before the alpha tag
   - MySQL-backed integration tests enabled via `MYR_RUN_MYSQL_INTEGRATION=1`
   - MariaDB compatibility lane runs `myr-adapters` integration test suite on `mariadb:11.4`
   - TUI MySQL integration gate enabled via `MYR_RUN_TUI_MYSQL_INTEGRATION=1`

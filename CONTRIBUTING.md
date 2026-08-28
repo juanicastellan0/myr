@@ -15,7 +15,7 @@ Thanks for contributing.
 - Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo test`, and `cargo build` before opening a PR.
 - Run coverage locally when your change affects core behavior:
-  - `cargo llvm-cov --workspace --all-features --summary-only`
+  - `cargo llvm-cov --workspace --all-features`
 - Update docs when behavior or architecture changes.
 - If you change `[workspace.package].version`, also update install channels:
   - `scripts/update-install-channels.sh <version> "$(git rev-parse HEAD)"`

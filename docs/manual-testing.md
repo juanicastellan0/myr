@@ -1,5 +1,16 @@
 # Manual Testing
 
+## Native GUI Alpha Smoke
+
+1. Start MySQL data with `scripts/dev-db-seed.sh` and export `MYR_DB_PASSWORD=root`.
+2. Run `cargo run -p myr-gui-app --bin myr-gui` at 1280×800, then repeat at 1024×768 and desktop scale 2×.
+3. Create or edit a profile, select env/keyring, configure TLS/CA if available, save, connect, and verify only databases initially appear.
+4. Select a database and verify tables load; select a table and verify columns load; run Preview.
+5. Run safe `SELECT`, cancel a long query, and verify the window stays responsive. Run risky SQL and verify confirmation; enable read-only and verify it is blocked.
+6. Search the loaded buffer and page through its virtual window. Verify typed `NULL`, numeric, binary, and temporal cells.
+7. Export loaded rows and verify its count matches `rows_buffered`. Export a full read query and verify `.part` disappears after success; cancel and verify no final/partial file remains.
+8. Build the AppImage and test it on Ubuntu 22.04/24.04 under X11 and Wayland.
+
 Manual smoke plan for validating TUI behavior and MySQL connectivity.
 
 ## Prerequisites
