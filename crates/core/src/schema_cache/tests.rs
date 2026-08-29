@@ -238,6 +238,25 @@ async fn zero_ttl_refetches_on_each_request() {
 }
 
 #[tokio::test]
+async fn primed_database_scope_avoids_a_duplicate_backend_read() {
+    let counts = Arc::new(BackendCounts::default());
+    let backend = FakeSchemaBackend {
+        counts: Arc::clone(&counts),
+        schema: sample_schema(),
+    };
+    let mut cache = SchemaCacheService::new(backend, Duration::from_secs(60));
+    cache.prime_databases(vec!["app".to_string(), "analytics".to_string()]);
+
+    let databases = cache
+        .list_databases()
+        .await
+        .expect("primed databases should be returned");
+
+    assert_eq!(databases, vec!["app", "analytics"]);
+    assert_eq!(counts.databases.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn list_columns_returns_expected_shape() {
     let backend = FakeSchemaBackend {
         counts: Arc::new(BackendCounts::default()),

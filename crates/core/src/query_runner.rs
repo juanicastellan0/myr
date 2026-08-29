@@ -32,15 +32,7 @@ impl QueryValue {
             Self::UInt(value) => value.to_string(),
             Self::Float(value) => value.to_string(),
             Self::Text(value) | Self::DateTime(value) | Self::Time(value) => value.clone(),
-            Self::Bytes(bytes) => {
-                let mut rendered = String::with_capacity(bytes.len().saturating_mul(2) + 2);
-                rendered.push_str("0x");
-                for byte in bytes {
-                    use std::fmt::Write as _;
-                    let _ = write!(rendered, "{byte:02x}");
-                }
-                rendered
-            }
+            Self::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         }
     }
 
@@ -55,11 +47,20 @@ impl QueryValue {
             Self::Text(value) | Self::DateTime(value) | Self::Time(value) => value.clone().into(),
             Self::Bytes(value) => serde_json::json!({
                 "encoding": "hex",
-                "data": self.display_text().trim_start_matches("0x"),
+                "data": encode_hex(value),
                 "bytes": value.len(),
             }),
         }
     }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut rendered = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(rendered, "{byte:02x}");
+    }
+    rendered
 }
 
 impl std::fmt::Display for QueryValue {
@@ -369,9 +370,49 @@ mod tests {
 
         assert_eq!(QueryValue::Null.display_text(), "NULL");
         assert_eq!(QueryValue::Int(-3).display_text(), "-3");
-        assert_eq!(QueryValue::Bytes(vec![0, 255]).display_text(), "0x00ff");
+        assert_eq!(
+            QueryValue::Bytes(b"legacy".to_vec()).display_text(),
+            "legacy"
+        );
         assert_eq!(QueryValue::UInt(7).typed_json_value(), serde_json::json!(7));
         assert_eq!(QueryValue::Null.typed_json_value(), serde_json::Value::Null);
+        assert_eq!(
+            QueryValue::Bytes(vec![0, 255]).typed_json_value(),
+            serde_json::json!({
+                "encoding": "hex",
+                "data": "00ff",
+                "bytes": 2,
+            })
+        );
+    }
+
+    #[test]
+    fn result_batches_preserve_metadata_types_and_truncation_counts() {
+        use super::{ColumnMeta, QueryResultBatch, QueryValue};
+
+        let mut column = ColumnMeta::new("payload");
+        column.schema = Some("app".to_string());
+        column.table = Some("events".to_string());
+        column.mysql_type = "MYSQL_TYPE_BLOB".to_string();
+        column.flags = 128;
+        column.character_set = 63;
+        let batch = QueryResultBatch::new(
+            vec![column.clone()],
+            vec![QueryRow::from_values(vec![QueryValue::Bytes(
+                b"payload".to_vec(),
+            )])],
+            3,
+        );
+
+        assert_eq!(batch.columns, vec![column]);
+        assert_eq!(batch.rows_seen, 3);
+        assert_eq!(batch.rows_buffered, 1);
+        assert!(batch.truncated);
+
+        let encoded = serde_json::to_string(&batch).expect("batch should serialize");
+        let decoded: QueryResultBatch =
+            serde_json::from_str(&encoded).expect("batch should deserialize");
+        assert_eq!(decoded, batch);
     }
 
     #[tokio::test]

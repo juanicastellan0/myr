@@ -174,6 +174,20 @@ async fn mysql_backend_connection_schema_and_query_paths() {
         .start_query("SELECT * FROM integration_types")
         .await
         .expect("typed query should start");
+    let typed_columns = typed_stream
+        .columns()
+        .expect("typed query should expose column metadata");
+    assert_eq!(typed_columns.len(), 8);
+    assert_eq!(typed_columns[0].name, "signed_value");
+    assert_eq!(typed_columns[0].schema.as_deref(), Some(database));
+    assert_eq!(typed_columns[0].table.as_deref(), Some("integration_types"));
+    assert_eq!(
+        typed_columns[0].original_name.as_deref(),
+        Some("signed_value")
+    );
+    assert!(typed_columns
+        .iter()
+        .all(|column| !column.mysql_type.is_empty()));
     let typed_row = typed_stream
         .next_row()
         .await
@@ -184,8 +198,15 @@ async fn mysql_backend_connection_schema_and_query_paths() {
     assert_eq!(typed_row.values[2], QueryValue::Float(1.25));
     assert_eq!(typed_row.values[3], QueryValue::Text("hello".to_string()));
     assert_eq!(typed_row.values[4], QueryValue::Bytes(vec![0, 255, 65]));
-    assert!(matches!(typed_row.values[5], QueryValue::DateTime(_)));
-    assert!(matches!(typed_row.values[6], QueryValue::Time(_)));
+    assert_eq!(
+        typed_row.values[5],
+        QueryValue::DateTime("2024-05-06 07:08:09.123456".to_string())
+    );
+    assert!(matches!(
+        &typed_row.values[6],
+        QueryValue::Time(value)
+            if value == "000 10:11:12.654321" || value == "10:11:12.654321"
+    ));
     assert_eq!(typed_row.values[7], QueryValue::Null);
     assert!(typed_stream
         .next_row()
