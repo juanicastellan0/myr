@@ -235,6 +235,7 @@ jobs:
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: myr ${{ needs.prepare.outputs.tag }}
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
