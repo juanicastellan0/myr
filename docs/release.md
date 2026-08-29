@@ -59,6 +59,8 @@ git push origin v0.2.0-alpha.1
 - Builds `myr-gui` on Ubuntu 22.04 x86_64 and packages it with `linuxdeploy`.
 - Verifies the downloaded `linuxdeploy` binary against its pinned SHA-256 digest.
 - Uses the same packaging and verification scripts exercised by CI before tagging.
+- Bundles and verifies `libxkbcommon-x11`, which Iced loads dynamically and
+  cannot be discovered through the GUI binary's ELF dependency graph.
 - Produces archives for:
   - `linux-x86_64`
   - `linux-aarch64`
