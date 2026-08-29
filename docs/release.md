@@ -27,9 +27,10 @@ The `GUI package smoke (Ubuntu 22.04)` CI job builds the same AppImage and
 AppImage runtime check, and publishes pre-release artifacts for inspection.
 Do not create the release tag until that job and the coverage gate pass.
 
-2. Sync Homebrew/Scoop install channels to the current commit:
+2. Freeze the release commit, then sync Homebrew/Scoop install channels to it:
 
 ```bash
+release_revision="$(git rev-parse HEAD)"
 version="$(awk '
   /^\[workspace\.package\]$/ { in_section=1; next }
   /^\[/ { in_section=0 }
@@ -39,14 +40,18 @@ version="$(awk '
     exit
   }
 ' Cargo.toml)"
-scripts/update-install-channels.sh "${version}" "$(git rev-parse HEAD)"
+scripts/update-install-channels.sh "${version}" "${release_revision}"
 git add Formula/myr.rb bucket/myr.json
 ```
+
+Commit and merge the channel metadata without changing product code. The
+release tag must continue to point to `release_revision`: a formula cannot pin
+its own revision to the later commit that contains the formula update.
 
 3. Create and push an annotated tag that matches the workspace version (the first GUI alpha is shown):
 
 ```bash
-git tag -a v0.2.0-alpha.1 -m "v0.2.0-alpha.1"
+git tag -a v0.2.0-alpha.1 "${release_revision}" -m "v0.2.0-alpha.1"
 git push origin v0.2.0-alpha.1
 ```
 
