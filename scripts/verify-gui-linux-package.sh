@@ -9,6 +9,11 @@ fi
 
 version="$1"
 artifact_dir="$2"
+if [[ ! -d "${artifact_dir}" ]]; then
+  echo "Artifact directory does not exist: ${artifact_dir}" >&2
+  exit 1
+fi
+artifact_dir="$(realpath -- "${artifact_dir}")"
 artifact_root="myr-gui-${version}-linux-x86_64"
 archive="${artifact_dir}/${artifact_root}.tar.gz"
 appimage="${artifact_dir}/${artifact_root}.AppImage"
@@ -38,5 +43,24 @@ if [[ "${actual_entries}" != "${expected_entries}" ]]; then
 fi
 
 APPIMAGE_EXTRACT_AND_RUN=1 "${appimage}" --appimage-version
+
+extract_dir="$(mktemp -d "${TMPDIR:-/tmp}/myr-gui-verify.XXXXXX")"
+cleanup() {
+  rm -rf -- "${extract_dir}"
+}
+trap cleanup EXIT
+(
+  cd -- "${extract_dir}"
+  "${appimage}" --appimage-extract >/dev/null
+)
+bundled_xkbcommon_x11="$(find "${extract_dir}/squashfs-root/usr/lib" \
+  -maxdepth 1 \
+  -name 'libxkbcommon-x11.so*' \
+  -print \
+  -quit)"
+if [[ -z "${bundled_xkbcommon_x11}" ]]; then
+  echo "AppImage does not bundle the dynamically loaded libxkbcommon-x11 runtime." >&2
+  exit 1
+fi
 
 printf 'Verified %s and %s\n' "${archive}" "${appimage}"

@@ -47,6 +47,23 @@ if [[ ! -x "${linuxdeploy}" ]]; then
   exit 1
 fi
 
+resolve_dynamic_library() {
+  local library_name="$1"
+  ldconfig -p \
+    | awk -v library_name="${library_name}" \
+      '$1 == library_name && $0 ~ /x86-64/ { print $NF; exit }'
+}
+
+# winit loads this library with dlopen, so linuxdeploy cannot discover it by
+# walking the GUI binary's ELF dependencies. Bundle it explicitly to keep the
+# X11 backend usable on minimal Ubuntu installations. linuxdeploy also follows
+# and bundles its non-system dependencies, including libxkbcommon itself.
+xkbcommon_x11="$(resolve_dynamic_library "libxkbcommon-x11.so.0")"
+if [[ -z "${xkbcommon_x11}" || ! -f "${xkbcommon_x11}" ]]; then
+  echo "Required runtime library libxkbcommon-x11.so.0 was not found." >&2
+  exit 1
+fi
+
 binary="$(realpath -- "${binary}")"
 linuxdeploy="$(realpath -- "${linuxdeploy}")"
 mkdir -p -- "${output_dir}"
@@ -105,6 +122,7 @@ install -Dm644 "${repo_root}/LICENSE" "${appdir}/usr/share/doc/myr/LICENSE"
   ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "${linuxdeploy}" \
     --appdir "${appdir}" \
     --executable "${appdir}/usr/bin/myr-gui" \
+    --library "${xkbcommon_x11}" \
     --desktop-file "${repo_root}/packaging/linux/io.github.juanicastellan0.myr.desktop" \
     --icon-file "${repo_root}/packaging/linux/io.github.juanicastellan0.myr.svg" \
     --output appimage
