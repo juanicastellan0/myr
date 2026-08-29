@@ -12,13 +12,15 @@ use ratatui::Terminal;
 use tempfile::TempDir;
 
 use super::{
-    bookmark_base_name, candidate_key_column, centered_rect, connection_badge_and_marker,
-    extract_key_bounds, is_connection_lost_error, is_transient_query_error, map_key_event,
-    next_bookmark_name, parse_password_source, parse_read_only_flag, parse_tls_mode,
-    quote_identifier, render, suggest_limit_in_editor, wizard_form_from_profile, ActionId,
-    ActionInvocation, AppView, ConnectIntent, DirectionKey, ErrorKind, ManagerLane, Msg,
-    MysqlDataBackend, PaginationPlan, Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer,
-    SchemaColumnViewMode, SchemaLane, TuiApp, WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
+    bookmark_base_name, candidate_key_column, centered_rect, compact_sql_for_audit,
+    connection_badge_and_marker, extract_key_bounds, is_connection_lost_error,
+    is_transient_query_error, map_key_event, next_bookmark_name, next_char_boundary,
+    parse_password_source, parse_read_only_flag, parse_tls_mode, previous_char_boundary,
+    quote_identifier, render, sanitize_bookmark_segment, suggest_limit_in_editor,
+    truncate_for_audit, wizard_form_from_profile, ActionId, ActionInvocation, AppView,
+    ConnectIntent, DirectionKey, ErrorKind, ManagerLane, Msg, MysqlDataBackend, PaginationPlan,
+    Pane, QueryRow, QueryWorkerOutcome, ResultsRingBuffer, SchemaColumnViewMode, SchemaLane,
+    TuiApp, WizardField, QUERY_DURATION_TICKS, QUERY_RETRY_LIMIT,
 };
 
 fn app_in_pane(pane: Pane) -> TuiApp {
@@ -1566,6 +1568,69 @@ fn helper_geometry_and_identifier_quote_are_stable() {
 }
 
 #[test]
+fn text_audit_bookmark_and_character_boundary_helpers_cover_edges() {
+    assert_eq!(
+        bookmark_base_name(None, Some("***"), None),
+        "default:db.query"
+    );
+    assert_eq!(sanitize_bookmark_segment(" _a b/c_ "), "a_b_c");
+    assert_eq!(sanitize_bookmark_segment(&"x".repeat(200)).len(), 64);
+
+    assert_eq!(
+        compact_sql_for_audit(" SELECT\n  *\tFROM users "),
+        "SELECT * FROM users"
+    );
+    assert_eq!(truncate_for_audit("áéí", 2), "áé...");
+    assert_eq!(truncate_for_audit("áé", 2), "áé");
+
+    assert_eq!(previous_char_boundary("éx", 0), 0);
+    assert_eq!(previous_char_boundary("éx", usize::MAX), 2);
+    assert_eq!(next_char_boundary("éx", 0), 2);
+    assert_eq!(next_char_boundary("éx", 2), 3);
+    assert_eq!(next_char_boundary("éx", usize::MAX), 3);
+}
+
+#[test]
+fn keymap_covers_all_navigation_slots_and_fallbacks() {
+    let ctrl = KeyModifiers::CONTROL;
+    let alt = KeyModifiers::ALT;
+    assert_eq!(
+        map_key_event(KeyEvent::new(KeyCode::Char('j'), ctrl)),
+        Some(Msg::InsertNewline)
+    );
+    assert_eq!(
+        map_key_event(KeyEvent::new(KeyCode::Enter, ctrl)),
+        Some(Msg::InsertNewline)
+    );
+    assert_eq!(map_key_event(KeyEvent::new(KeyCode::Char('x'), ctrl)), None);
+    assert_eq!(map_key_event(KeyEvent::new(KeyCode::Char('x'), alt)), None);
+
+    for (code, expected) in [
+        (KeyCode::Esc, Msg::TogglePalette),
+        (KeyCode::Backspace, Msg::Backspace),
+        (KeyCode::Up, Msg::Navigate(DirectionKey::Up)),
+        (KeyCode::Down, Msg::Navigate(DirectionKey::Down)),
+        (KeyCode::Left, Msg::Navigate(DirectionKey::Left)),
+        (KeyCode::Right, Msg::Navigate(DirectionKey::Right)),
+        (KeyCode::Char('2'), Msg::InvokeActionSlot(1)),
+        (KeyCode::Char('3'), Msg::InvokeActionSlot(2)),
+        (KeyCode::Char('4'), Msg::InvokeActionSlot(3)),
+        (KeyCode::Char('5'), Msg::InvokeActionSlot(4)),
+        (KeyCode::Char('6'), Msg::InvokeActionSlot(5)),
+        (KeyCode::Char('7'), Msg::InvokeActionSlot(6)),
+    ] {
+        assert_eq!(
+            map_key_event(KeyEvent::new(code, KeyModifiers::NONE)),
+            Some(expected)
+        );
+    }
+    assert_eq!(
+        map_key_event(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
+        None
+    );
+}
+
+#[test]
 fn handle_toggles_and_quit_paths_update_state() {
     let mut app = app_in_pane(Pane::QueryEditor);
 
@@ -1600,6 +1665,341 @@ fn record_render_updates_fps_after_window_rollover() {
     assert!(app.last_render_ms > 0.0);
     assert!(app.fps > 0.0);
     assert_eq!(app.recent_render_count, 0);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn query_editor_input_cursor_history_and_wizard_edges_are_safe() {
+    let mut editor = app_in_pane(Pane::QueryEditor);
+    editor.query_editor_text.clear();
+    editor.query_cursor = 0;
+
+    editor.handle(Msg::InputChar('é'));
+    assert_eq!(editor.query_editor_text, "é");
+    assert_eq!(editor.query_cursor, 'é'.len_utf8());
+
+    editor.handle(Msg::Navigate(DirectionKey::Left));
+    assert_eq!(editor.query_cursor, 0);
+    editor.handle(Msg::InputChar('A'));
+    editor.handle(Msg::Navigate(DirectionKey::Right));
+    assert_eq!(editor.query_editor_text, "Aé");
+    editor.handle(Msg::Backspace);
+    assert_eq!(editor.query_editor_text, "A");
+
+    editor.handle(Msg::InsertNewline);
+    assert_eq!(editor.query_editor_text, "A\n");
+    editor.show_palette = true;
+    editor.handle(Msg::InsertNewline);
+    assert_eq!(editor.query_editor_text, "A\n");
+    editor.show_palette = false;
+    editor.results_search_mode = true;
+    editor.handle(Msg::InsertNewline);
+    assert_eq!(editor.query_editor_text, "A\n");
+    editor.results_search_mode = false;
+
+    editor.query_editor_text = "éx".to_string();
+    editor.query_cursor = 1;
+    editor.handle(Msg::InputChar('X'));
+    assert_eq!(editor.query_editor_text, "Xéx");
+    editor.query_cursor = 0;
+    editor.handle(Msg::Backspace);
+    assert_eq!(editor.query_editor_text, "Xéx");
+
+    editor.query_history.clear();
+    editor.handle(Msg::Navigate(DirectionKey::Up));
+    assert_eq!(editor.status_line, "Query history is empty");
+    editor.record_query_history("   ");
+    editor.record_query_history(" SELECT 1 ");
+    editor.record_query_history("SELECT 1");
+    assert_eq!(editor.query_history, ["SELECT 1"]);
+    for index in 0..105 {
+        editor.record_query_history(format!("SELECT {index}").as_str());
+    }
+    assert_eq!(editor.query_history.len(), 100);
+
+    editor.query_history = vec!["SELECT 1".to_string(), "SELECT 2".to_string()];
+    editor.query_history_index = None;
+    editor.query_history_draft = None;
+    editor.query_editor_text = "SELECT draft".to_string();
+    editor.query_cursor = editor.query_editor_text.len();
+    editor.handle(Msg::Navigate(DirectionKey::Up));
+    assert_eq!(editor.query_editor_text, "SELECT 2");
+    editor.handle(Msg::Navigate(DirectionKey::Up));
+    assert_eq!(editor.query_editor_text, "SELECT 1");
+    editor.handle(Msg::Navigate(DirectionKey::Down));
+    assert_eq!(editor.query_editor_text, "SELECT 2");
+    editor.handle(Msg::Navigate(DirectionKey::Down));
+    assert_eq!(editor.query_editor_text, "SELECT draft");
+    editor.handle(Msg::Navigate(DirectionKey::Down));
+    assert_eq!(editor.status_line, "Already at latest editor query");
+
+    editor.query_history_index = Some(0);
+    editor.query_history_draft = Some("draft".to_string());
+    editor.handle(Msg::ClearInput);
+    assert!(editor.query_editor_text.is_empty());
+    assert_eq!(editor.query_cursor, 0);
+    assert!(editor.query_history_index.is_none());
+    assert!(editor.query_history_draft.is_none());
+
+    let mut non_editor = app_in_pane(Pane::Results);
+    non_editor.handle(Msg::InsertNewline);
+    assert_eq!(
+        non_editor.status_line,
+        "Newline insert is only available in query editor"
+    );
+    non_editor.handle(Msg::InvokeActionSlot(99));
+    assert_eq!(non_editor.status_line, "No action bound to slot 100");
+
+    let mut palette = app_in_pane(Pane::QueryEditor);
+    palette.show_palette = true;
+    palette.handle(Msg::InputChar('p'));
+    palette.handle(Msg::ClearInput);
+    assert!(palette.palette_query.is_empty());
+    palette.handle(Msg::InvokeActionSlot(999));
+    assert!(!palette.show_palette);
+
+    let mut wizard = app_in_pane(Pane::ConnectionWizard);
+    wizard.handle(Msg::InputChar('x'));
+    assert!(wizard.status_line.contains("Press E or Enter"));
+    wizard.handle(Msg::Backspace);
+    wizard.handle(Msg::ClearInput);
+    wizard.handle(Msg::InvokeActionSlot(0));
+    assert!(wizard.status_line.contains("Press E or Enter"));
+    wizard.handle(Msg::InputChar('E'));
+    assert!(wizard.wizard_form.editing);
+    wizard.handle(Msg::TogglePalette);
+    assert!(!wizard.wizard_form.editing);
+
+    for field in [
+        WizardField::ProfileName,
+        WizardField::Host,
+        WizardField::Port,
+        WizardField::User,
+        WizardField::PasswordSource,
+        WizardField::Database,
+        WizardField::TlsMode,
+        WizardField::ReadOnly,
+    ] {
+        wizard.wizard_form.active_field = field;
+        wizard.start_wizard_edit();
+        wizard.wizard_form.edit_buffer = "updated".to_string();
+        wizard.commit_wizard_edit();
+        assert!(!wizard.wizard_form.editing);
+    }
+
+    wizard.pane = Pane::Results;
+    wizard.start_wizard_edit();
+    wizard.commit_wizard_edit();
+    wizard.cancel_wizard_edit();
+    assert!(!wizard.wizard_form.editing);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn manager_bookmark_rename_navigation_and_empty_edges_are_explicit() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let mut app = app_with_manager_stores(Pane::SchemaExplorer, &temp_dir);
+    {
+        let store = app.bookmark_store.as_mut().expect("bookmark store");
+        store.upsert_bookmark(SavedBookmark::new("alpha"));
+        store.upsert_bookmark(SavedBookmark::new("beta"));
+        store.persist().expect("persist bookmarks");
+    }
+
+    app.handle(Msg::GoProfileBookmarkManager);
+    app.handle(Msg::Navigate(DirectionKey::Right));
+    assert_eq!(app.manager_lane, ManagerLane::Bookmarks);
+    app.handle(Msg::Navigate(DirectionKey::Down));
+    app.handle(Msg::Navigate(DirectionKey::Up));
+    assert_eq!(app.manager_bookmark_cursor, 0);
+
+    app.handle(Msg::InputChar('r'));
+    let rename_before = app.manager_rename_buffer.clone();
+    app.handle_manager_input_char('\n');
+    assert_eq!(app.manager_rename_buffer, rename_before);
+    app.handle(Msg::Backspace);
+    app.handle(Msg::ClearInput);
+    for ch in "gamma".chars() {
+        app.handle(Msg::InputChar(ch));
+    }
+    app.handle(Msg::Submit);
+    assert!(app
+        .bookmark_store
+        .as_ref()
+        .expect("bookmark store")
+        .bookmark("gamma")
+        .is_some());
+
+    app.handle(Msg::InputChar('r'));
+    app.handle(Msg::Submit);
+    assert_eq!(app.status_line, "Bookmark name unchanged");
+
+    app.handle(Msg::InputChar('r'));
+    app.handle(Msg::ClearInput);
+    for ch in "beta".chars() {
+        app.handle(Msg::InputChar(ch));
+    }
+    app.handle(Msg::Submit);
+    assert!(app.status_line.contains("already exists"));
+    app.handle(Msg::ClearInput);
+    app.handle(Msg::Submit);
+    assert_eq!(app.status_line, "Rename failed: name cannot be empty");
+    app.handle(Msg::Navigate(DirectionKey::Down));
+    assert!(app.status_line.starts_with("Rename mode active"));
+    app.handle(Msg::TogglePalette);
+    assert_eq!(app.status_line, "Rename canceled");
+
+    app.manager_bookmark_cursor = 1;
+    app.handle(Msg::DeleteSelection);
+    assert_eq!(app.manager_bookmark_cursor, 0);
+
+    let empty_dir = TempDir::new().expect("failed to create empty temp dir");
+    let mut empty = app_with_manager_stores(Pane::ProfileBookmarks, &empty_dir);
+    empty.handle(Msg::Navigate(DirectionKey::Up));
+    assert_eq!(empty.status_line, "No profiles available");
+    empty.handle(Msg::InputChar('r'));
+    assert_eq!(empty.status_line, "No profiles selected");
+    empty.handle(Msg::InputChar('d'));
+    assert_eq!(empty.status_line, "No profiles available");
+    empty.handle(Msg::InputChar('q'));
+    assert_eq!(empty.status_line, "No profiles available");
+    empty.connect_from_manager();
+    assert!(empty
+        .status_line
+        .starts_with("No profile available for connect"));
+    empty.open_manager_selection();
+    assert_eq!(empty.status_line, "No profiles available");
+    empty.handle(Msg::DeleteSelection);
+    assert_eq!(empty.status_line, "No profiles available");
+
+    empty.handle(Msg::Navigate(DirectionKey::Right));
+    empty.handle(Msg::Navigate(DirectionKey::Down));
+    assert_eq!(empty.status_line, "No bookmarks available");
+    empty.handle(Msg::InputChar('r'));
+    assert_eq!(empty.status_line, "No bookmarks selected");
+    empty.handle(Msg::InputChar('d'));
+    assert_eq!(
+        empty.status_line,
+        "Default profile marker applies to Profiles lane"
+    );
+    empty.handle(Msg::InputChar('q'));
+    assert_eq!(
+        empty.status_line,
+        "Quick reconnect marker applies to Profiles lane"
+    );
+    empty.open_manager_selection();
+    assert_eq!(empty.status_line, "No bookmarks available");
+    empty.handle(Msg::DeleteSelection);
+    assert_eq!(empty.status_line, "No bookmarks available");
+
+    let mut unavailable = app_in_pane(Pane::ProfileBookmarks);
+    unavailable.manager_rename_mode = true;
+    unavailable.manager_rename_buffer = "renamed".to_string();
+    unavailable.commit_manager_rename();
+    assert_eq!(
+        unavailable.status_line,
+        "Profile storage unavailable on this platform"
+    );
+    unavailable.manager_lane = ManagerLane::Bookmarks;
+    unavailable.commit_manager_rename();
+    assert_eq!(
+        unavailable.status_line,
+        "Bookmark storage unavailable on this platform"
+    );
+    unavailable.manager_rename_mode = false;
+    unavailable.handle(Msg::DeleteSelection);
+    assert_eq!(
+        unavailable.status_line,
+        "Bookmark storage unavailable on this platform"
+    );
+
+    unavailable.pane = Pane::Results;
+    let status = unavailable.status_line.clone();
+    unavailable.handle_manager_input_char('r');
+    unavailable.handle_manager_backspace();
+    unavailable.clear_manager_rename_buffer();
+    assert_eq!(unavailable.status_line, status);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn schema_empty_filter_navigation_and_reload_edges_are_explicit() {
+    let mut app = app_in_pane(Pane::SchemaExplorer);
+    app.schema_lane = SchemaLane::Databases;
+    app.schema_databases.clear();
+    app.handle(Msg::InputChar('x'));
+    assert_eq!(app.status_line, "No databases available");
+    app.handle(Msg::Navigate(DirectionKey::Down));
+    assert_eq!(app.status_line, "No databases available");
+
+    app.schema_databases = vec!["app".to_string(), "analytics".to_string()];
+    app.schema_database_filter = "missing".to_string();
+    app.navigate_schema_databases(DirectionKey::Up);
+    assert!(app.status_line.starts_with("No databases match filter"));
+    app.clear_schema_filter();
+    app.navigate_schema_databases(DirectionKey::Down);
+    app.navigate_schema_databases(DirectionKey::Up);
+    app.navigate_schema_databases(DirectionKey::Left);
+    app.navigate_schema_databases(DirectionKey::Right);
+    assert_eq!(app.active_database.as_deref(), Some("app"));
+
+    app.schema_lane = SchemaLane::Tables;
+    app.schema_tables.clear();
+    app.handle(Msg::InputChar('x'));
+    assert_eq!(app.status_line, "No tables available");
+    app.handle(Msg::Navigate(DirectionKey::Down));
+    assert_eq!(app.status_line, "No tables available");
+    app.schema_tables = vec!["users".to_string(), "events".to_string()];
+    app.schema_table_filter = "missing".to_string();
+    app.navigate_schema_tables(DirectionKey::Down);
+    assert!(app.status_line.starts_with("No tables match filter"));
+    app.schema_table_filter.clear();
+    app.navigate_schema_tables(DirectionKey::Down);
+    app.navigate_schema_tables(DirectionKey::Up);
+    app.navigate_schema_tables(DirectionKey::Left);
+    app.navigate_schema_tables(DirectionKey::Right);
+
+    app.schema_lane = SchemaLane::Columns;
+    app.schema_columns.clear();
+    app.handle(Msg::InputChar('x'));
+    assert_eq!(app.status_line, "No columns available");
+    app.handle(Msg::Navigate(DirectionKey::Down));
+    assert_eq!(app.status_line, "No columns available");
+    app.schema_columns = vec!["id".to_string(), "email".to_string()];
+    app.schema_column_filter = "missing".to_string();
+    app.navigate_schema_columns(DirectionKey::Down);
+    assert!(app.status_line.starts_with("No columns match filter"));
+    app.schema_column_filter.clear();
+    app.navigate_schema_columns(DirectionKey::Down);
+    app.navigate_schema_columns(DirectionKey::Up);
+    app.navigate_schema_columns(DirectionKey::Left);
+    app.navigate_schema_columns(DirectionKey::Right);
+
+    let previous_filter = app.schema_column_filter.clone();
+    app.append_schema_filter_char('\n');
+    assert_eq!(app.schema_column_filter, previous_filter);
+
+    app.active_database = None;
+    app.reload_tables_for_active_database();
+    assert!(app.schema_tables.is_empty());
+    assert!(app.selection.table.is_none());
+    assert!(app.schema_columns.is_empty());
+
+    app.selection.table = None;
+    app.reload_columns_for_selected_table();
+    assert!(app.schema_relationships.is_empty());
+    app.reload_relationships_for_selected_table();
+    assert!(app.schema_relationships.is_empty());
+    app.jump_to_next_related_table();
+    assert_eq!(
+        app.status_line,
+        "No related tables discovered for the current selection"
+    );
+
+    app.selection.database = None;
+    app.selection.table = Some("odd`table".to_string());
+    app.set_query_editor_to_selected_table();
+    assert_eq!(app.query_editor_text, "SELECT * FROM `odd``table`");
 }
 
 #[test]
