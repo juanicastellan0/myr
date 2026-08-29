@@ -3,7 +3,7 @@ use myr_core::profiles::ConnectionProfile;
 use myr_core::query_runner::QueryRowStream;
 use myr_core::schema_cache::{ColumnSchema, TableRelationship};
 
-use crate::AppErrorKind;
+use crate::{AppErrorKind, CancellationToken};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationBackendError {
@@ -50,6 +50,7 @@ pub trait ApplicationSession: Send + Sync + 'static {
     async fn start_query(
         &self,
         sql: &str,
+        cancellation: CancellationToken,
     ) -> Result<Box<dyn QueryRowStream + Send>, ApplicationBackendError>;
 
     async fn disconnect(&self) -> Result<(), ApplicationBackendError>;

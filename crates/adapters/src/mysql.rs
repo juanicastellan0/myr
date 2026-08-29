@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use myr_application::{
     AppErrorKind, ApplicationBackendError, ApplicationBackendFactory, ApplicationSession,
+    CancellationToken,
 };
 use myr_core::connection_manager::{BackendError, ConnectionBackend};
 use myr_core::profiles::{ConnectionProfile, PasswordSource, TlsMode};
@@ -82,6 +83,45 @@ impl MysqlDataBackend {
     pub async fn disconnect(&self) -> Result<(), mysql_async::Error> {
         self.pool.clone().disconnect().await
     }
+
+    async fn start_cancellable_query(
+        &self,
+        sql: &str,
+        cancellation: CancellationToken,
+    ) -> Result<MysqlStreamingRowStream, ApplicationBackendError> {
+        let connection = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                return Err(ApplicationBackendError::new(
+                    AppErrorKind::Cancellation,
+                    "query cancelled",
+                ));
+            }
+            result = self.pool.get_conn() => {
+                result.map_err(|error| classify_application_error(&error.to_string()))?
+            }
+        };
+        let connection_id = connection.id();
+        let query = sql.to_string().stream::<Row, _>(connection);
+        let stream = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                kill_query(&self.pool, connection_id).await?;
+                return Err(ApplicationBackendError::new(
+                    AppErrorKind::Cancellation,
+                    "query cancelled",
+                ));
+            }
+            result = query => {
+                result.map_err(|error| classify_application_error(&error.to_string()))?
+            }
+        };
+        Ok(MysqlStreamingRowStream::new(
+            stream,
+            self.pool.clone(),
+            connection_id,
+        ))
+    }
 }
 
 #[async_trait]
@@ -121,11 +161,11 @@ impl ApplicationSession for MysqlDataBackend {
     async fn start_query(
         &self,
         sql: &str,
+        cancellation: CancellationToken,
     ) -> Result<Box<dyn QueryRowStream + Send>, ApplicationBackendError> {
-        QueryBackend::start_query(self, sql)
+        self.start_cancellable_query(sql, cancellation)
             .await
             .map(|stream| Box::new(stream) as Box<dyn QueryRowStream + Send>)
-            .map_err(|error| classify_application_error(&error.to_string()))
     }
 
     async fn disconnect(&self) -> Result<(), ApplicationBackendError> {
@@ -247,12 +287,18 @@ impl SchemaBackend for MysqlDataBackend {
 #[derive(Debug)]
 pub struct MysqlStreamingRowStream {
     stream: Option<ResultSetStream<'static, 'static, 'static, Row, TextProtocol>>,
+    pool: Pool,
+    connection_id: u32,
     cancelled: bool,
     columns: Vec<ColumnMeta>,
 }
 
 impl MysqlStreamingRowStream {
-    fn new(stream: ResultSetStream<'static, 'static, 'static, Row, TextProtocol>) -> Self {
+    fn new(
+        stream: ResultSetStream<'static, 'static, 'static, Row, TextProtocol>,
+        pool: Pool,
+        connection_id: u32,
+    ) -> Self {
         let columns = stream
             .columns_ref()
             .iter()
@@ -270,6 +316,8 @@ impl MysqlStreamingRowStream {
             .collect();
         Self {
             stream: Some(stream),
+            pool,
+            connection_id,
             cancelled: false,
             columns,
         }
@@ -302,6 +350,9 @@ impl QueryRowStream for MysqlStreamingRowStream {
 
     async fn cancel(&mut self) -> Result<(), QueryBackendError> {
         self.cancelled = true;
+        kill_query(&self.pool, self.connection_id)
+            .await
+            .map_err(|error| QueryBackendError::new(error.message))?;
         self.stream = None;
         Ok(())
     }
@@ -312,13 +363,34 @@ impl QueryBackend for MysqlDataBackend {
     type Stream = MysqlStreamingRowStream;
 
     async fn start_query(&self, sql: &str) -> Result<Self::Stream, QueryBackendError> {
+        let connection = self.pool.get_conn().await.map_err(to_query_error)?;
+        let connection_id = connection.id();
         let stream = sql
             .to_string()
-            .stream::<Row, _>(self.pool.clone())
+            .stream::<Row, _>(connection)
             .await
             .map_err(to_query_error)?;
-        Ok(MysqlStreamingRowStream::new(stream))
+        Ok(MysqlStreamingRowStream::new(
+            stream,
+            self.pool.clone(),
+            connection_id,
+        ))
     }
+}
+
+async fn kill_query(pool: &Pool, connection_id: u32) -> Result<(), ApplicationBackendError> {
+    let mut connection = pool
+        .get_conn()
+        .await
+        .map_err(|error| classify_application_error(&error.to_string()))?;
+    connection
+        .query_drop(format!("KILL QUERY {connection_id}"))
+        .await
+        .map_err(|error| classify_application_error(&error.to_string()))?;
+    connection
+        .disconnect()
+        .await
+        .map_err(|error| classify_application_error(&error.to_string()))
 }
 
 fn opts_from_profile(profile: &ConnectionProfile) -> OptsBuilder {

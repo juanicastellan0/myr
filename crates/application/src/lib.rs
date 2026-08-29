@@ -4,6 +4,7 @@ mod types;
 
 pub use actor::{spawn_application, ApplicationHandle};
 pub use ports::{ApplicationBackendError, ApplicationBackendFactory, ApplicationSession};
+pub use tokio_util::sync::CancellationToken;
 pub use types::{
     AppCommand, AppError, AppErrorKind, AppEvent, AppSnapshot, ConfirmationSnapshot,
     ConnectionSnapshot, ConnectionStatus, ExportFormat, ExportRequest, ExportScope, ExportSnapshot,

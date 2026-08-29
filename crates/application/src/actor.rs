@@ -9,7 +9,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use myr_core::audit_trail::{unix_timestamp_millis, AuditOutcome, AuditRecord, FileAuditTrail};
 use myr_core::profiles::{ConnectionProfile, FileProfilesStore};
-use myr_core::query_runner::{CancellationToken, ColumnMeta, QueryRow, QueryValue};
+use myr_core::query_runner::{ColumnMeta, QueryRow, QueryValue};
 use myr_core::safe_mode::{ConfirmationToken, GuardDecision, SafeModeGuard};
 use myr_core::schema_cache::{
     ColumnSchema, SchemaBackend, SchemaBackendError, SchemaCacheError, SchemaCacheService,
@@ -23,6 +23,7 @@ use crate::types::{
     ConnectionStatus, ExportFormat, ExportRequest, ExportScope, OperationId, OperationKind,
     OperationProgress, ResultsSnapshot, SchemaSnapshot,
 };
+use crate::CancellationToken;
 
 const RESULT_BUFFER_CAPACITY: usize = 2_000;
 const QUERY_BATCH_CAPACITY: usize = 2_000;
@@ -1223,8 +1224,16 @@ async fn run_query(
     cancellation: CancellationToken,
     worker_tx: mpsc::UnboundedSender<WorkerEvent>,
 ) {
-    let mut stream = match session.start_query(&sql).await {
+    let mut stream = match session.start_query(&sql, cancellation.clone()).await {
         Ok(stream) => stream,
+        Err(error) if error.kind == AppErrorKind::Cancellation => {
+            let _ = worker_tx.send(WorkerEvent::QueryFinished {
+                operation_id,
+                rows_seen: 0,
+                cancelled: true,
+            });
+            return;
+        }
         Err(error) => {
             let _ = worker_tx.send(WorkerEvent::QueryFailed {
                 operation_id,
@@ -1239,24 +1248,28 @@ async fn run_query(
     let mut last_update = Instant::now();
 
     loop {
-        if cancellation.is_cancelled() {
-            let _ = stream.cancel().await;
-            send_query_progress(
-                &worker_tx,
-                operation_id,
-                &columns,
-                &mut pending_rows,
-                rows_seen,
-            );
-            let _ = worker_tx.send(WorkerEvent::QueryFinished {
-                operation_id,
-                rows_seen,
-                cancelled: true,
-            });
-            return;
-        }
+        let next_row = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                let _ = stream.cancel().await;
+                send_query_progress(
+                    &worker_tx,
+                    operation_id,
+                    &columns,
+                    &mut pending_rows,
+                    rows_seen,
+                );
+                let _ = worker_tx.send(WorkerEvent::QueryFinished {
+                    operation_id,
+                    rows_seen,
+                    cancelled: true,
+                });
+                return;
+            }
+            result = stream.next_row() => result,
+        };
 
-        match stream.next_row().await {
+        match next_row {
             Ok(Some(row)) => {
                 rows_seen = rows_seen.saturating_add(1);
                 pending_rows.push(row);
@@ -1369,13 +1382,16 @@ async fn export_rows(
     let result = async {
         let mut stream = match &request.scope {
             ExportScope::LoadedRows => None,
-            ExportScope::FullQuery { sql } => Some(
-                session
-                    .ok_or_else(|| AppError::new(AppErrorKind::Connection, "not connected"))?
-                    .start_query(sql)
-                    .await
-                    .map_err(app_backend_error)?,
-            ),
+            ExportScope::FullQuery { sql } => {
+                let session = session
+                    .ok_or_else(|| AppError::new(AppErrorKind::Connection, "not connected"))?;
+                Some(
+                    session
+                        .start_query(sql, cancellation.clone())
+                        .await
+                        .map_err(app_backend_error)?,
+                )
+            }
         };
         let columns = stream
             .as_ref()
@@ -1422,14 +1438,18 @@ async fn export_rows(
                 }
             }
             Some(stream) => loop {
-                if cancellation.is_cancelled() {
-                    let _ = stream.cancel().await;
-                    return Err(AppError::new(
-                        AppErrorKind::Cancellation,
-                        "export cancelled",
-                    ));
-                }
-                match stream.next_row().await {
+                let next_row = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        let _ = stream.cancel().await;
+                        return Err(AppError::new(
+                            AppErrorKind::Cancellation,
+                            "export cancelled",
+                        ));
+                    }
+                    result = stream.next_row() => result,
+                };
+                match next_row {
                     Ok(Some(row)) => {
                         writer.write_row(&row)?;
                         rows = rows.saturating_add(1);
@@ -1831,8 +1851,21 @@ mod tests {
         async fn start_query(
             &self,
             sql: &str,
+            cancellation: CancellationToken,
         ) -> Result<Box<dyn QueryRowStream + Send>, ApplicationBackendError> {
             let attempt = self.counts.queries.fetch_add(1, Ordering::Relaxed);
+            if sql.contains("slow-start") {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        return Err(ApplicationBackendError::new(
+                            AppErrorKind::Cancellation,
+                            "query cancelled",
+                        ));
+                    }
+                    () = tokio::time::sleep(Duration::from_secs(30)) => {}
+                }
+            }
             if sql.contains("retry-once") && attempt == 0 {
                 return Err(ApplicationBackendError::new(
                     AppErrorKind::Timeout,
@@ -2100,7 +2133,7 @@ mod tests {
         connect(&handle).await;
         handle
             .command(AppCommand::ExecuteSql {
-                sql: "SELECT slow".to_string(),
+                sql: "SELECT slow-start".to_string(),
             })
             .await
             .expect("slow query should send");
