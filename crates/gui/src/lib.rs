@@ -10,8 +10,8 @@ use iced::widget::{
 };
 use iced::{Element, Length, Subscription, Task, Theme};
 use myr_application::{
-    AppCommand, AppSnapshot, ApplicationHandle, ConnectionStatus, ExportFormat, ExportRequest,
-    ExportScope,
+    AppCommand, AppEvent, AppSnapshot, ApplicationHandle, ConnectionStatus, ExportFormat,
+    ExportRequest, ExportScope, OperationKind,
 };
 use myr_core::profiles::{ConnectionProfile, PasswordSource, TlsMode};
 
@@ -129,6 +129,7 @@ impl From<&ConnectionProfile> for ProfileDraft {
 
 pub struct Gui {
     application: Option<ApplicationHandle>,
+    events: Option<tokio::sync::broadcast::Receiver<AppEvent>>,
     snapshot: AppSnapshot,
     selected_profile: Option<String>,
     active_tab: Tab,
@@ -149,6 +150,7 @@ impl Gui {
     #[must_use]
     pub fn new(application: ApplicationHandle, preferences: GuiPreferences) -> Self {
         let snapshot = application.snapshot();
+        let events = Some(application.subscribe());
         let selected_profile = snapshot
             .profiles
             .iter()
@@ -164,6 +166,7 @@ impl Gui {
         let column_widths = vec![160.0; snapshot.results.columns.len()];
         Self {
             application: Some(application),
+            events,
             snapshot,
             selected_profile,
             active_tab: Tab::Schema,
@@ -186,6 +189,7 @@ impl Gui {
         let column_widths = vec![160.0; snapshot.results.columns.len()];
         Self {
             application: None,
+            events: None,
             snapshot,
             selected_profile: None,
             active_tab: Tab::Schema,
@@ -206,7 +210,7 @@ impl Gui {
     #[allow(clippy::too_many_lines)]
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tick => self.refresh_snapshot(),
+            Message::Tick => self.refresh_application(),
             Message::ProfileSelected(profile) => {
                 self.selected_profile = Some(profile);
             }
@@ -779,7 +783,9 @@ impl Gui {
     }
 
     fn bottom_bar(&self) -> Element<'_, Message> {
-        let progress = if self.snapshot.query.running {
+        let progress = if self.status == "Cancellation requested" {
+            self.status.clone()
+        } else if self.snapshot.query.running {
             format!("Query: {} rows", self.snapshot.results.rows_seen)
         } else if self.snapshot.export.running {
             format!(
@@ -798,40 +804,98 @@ impl Gui {
         content.into()
     }
 
-    fn refresh_snapshot(&mut self) {
-        let Some(application) = &self.application else {
+    fn refresh_application(&mut self) {
+        let Some(application) = self.application.clone() else {
             return;
         };
-        let previous_connection = self.snapshot.connection.status.clone();
-        let previous_query_running = self.snapshot.query.running;
-        let previous_export_running = self.snapshot.export.running;
         self.snapshot = application.snapshot();
+
+        let mut events = Vec::new();
+        if let Some(receiver) = &mut self.events {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                        self.snapshot = application.snapshot();
+                    }
+                    Err(
+                        tokio::sync::broadcast::error::TryRecvError::Empty
+                        | tokio::sync::broadcast::error::TryRecvError::Closed,
+                    ) => break,
+                }
+            }
+        }
+        for event in events {
+            self.handle_application_event(event);
+        }
+
         self.column_widths
             .resize(self.snapshot.results.columns.len(), 160.0);
-
-        if self.snapshot.query.confirmation.is_some() {
-            self.active_tab = Tab::Query;
-        } else if previous_query_running && !self.snapshot.query.running {
-            self.active_tab = Tab::Results;
-            self.status = format!("Query finished: {} rows", self.snapshot.results.rows_seen);
-        }
-        if previous_export_running && !self.snapshot.export.running {
-            self.status = format!(
-                "Export finished: {} rows, {} bytes",
-                self.snapshot.export.rows_written, self.snapshot.export.bytes_written
-            );
-        }
-        if previous_connection != self.snapshot.connection.status
-            && self.snapshot.connection.status == ConnectionStatus::Connected
-        {
-            self.status = "Connected; choose a database".to_string();
-        }
         if self
             .selected_profile
             .as_ref()
             .is_none_or(|selected| !self.snapshot.profiles.iter().any(|p| &p.name == selected))
         {
             self.selected_profile = self.snapshot.profiles.first().map(|p| p.name.clone());
+        }
+    }
+
+    fn handle_application_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::SnapshotChanged(snapshot) => self.snapshot = *snapshot,
+            AppEvent::ResultsBatch { .. } => {}
+            AppEvent::Progress(progress) => match progress.kind {
+                OperationKind::Query => {
+                    self.status = format!("Query: {} rows", progress.rows);
+                }
+                OperationKind::Export => {
+                    self.status =
+                        format!("Export: {} rows / {} bytes", progress.rows, progress.bytes);
+                }
+                OperationKind::Connection | OperationKind::Schema | OperationKind::Profile => {}
+            },
+            AppEvent::ConfirmationRequired(_) => {
+                self.active_tab = Tab::Query;
+                self.status = "Confirmation required".to_string();
+            }
+            AppEvent::Finished { kind, .. } => match kind {
+                OperationKind::Connection => {
+                    self.status = if self.snapshot.connection.status == ConnectionStatus::Connected
+                    {
+                        "Connected; choose a database".to_string()
+                    } else {
+                        "Disconnected".to_string()
+                    };
+                }
+                OperationKind::Schema => {
+                    self.status = if self.snapshot.schema.selected_table.is_some() {
+                        format!("Loaded {} columns", self.snapshot.schema.columns.len())
+                    } else if self.snapshot.schema.selected_database.is_some() {
+                        format!("Loaded {} tables", self.snapshot.schema.tables.len())
+                    } else {
+                        format!("Loaded {} databases", self.snapshot.schema.databases.len())
+                    };
+                }
+                OperationKind::Query => {
+                    self.active_tab = Tab::Results;
+                    self.status =
+                        format!("Query finished: {} rows", self.snapshot.results.rows_seen);
+                }
+                OperationKind::Export => {
+                    self.status = format!(
+                        "Export finished: {} rows, {} bytes",
+                        self.snapshot.export.rows_written, self.snapshot.export.bytes_written
+                    );
+                }
+                OperationKind::Profile => {}
+            },
+            AppEvent::Error(error) => {
+                self.status = if error.kind == myr_application::AppErrorKind::Cancellation {
+                    "Cancellation completed".to_string()
+                } else {
+                    "Operation failed".to_string()
+                };
+            }
         }
     }
 
@@ -1163,6 +1227,9 @@ mod tests {
         assert_eq!(gui.status, "Running confirmed query...");
         let _ = gui.update(Message::CancelOperation);
         assert_eq!(gui.status, "Cancellation requested");
+        let mut ui = simulator(gui.view());
+        assert!(ui.find("Cancellation requested").is_ok());
+        drop(ui);
         let _ = gui.update(Message::PreviewTable);
         assert_eq!(gui.status, "Loading preview at offset 0...");
         let _ = gui.update(Message::NextPreviewPage);
@@ -1261,5 +1328,109 @@ mod tests {
         let _ = gui.update(Message::CycleExportFormat);
         let _ = gui.update(Message::ClearError);
         let _ = gui.update(Message::Tick);
+    }
+
+    #[test]
+    fn application_events_report_fast_operation_completion() {
+        let mut gui = sample_gui();
+        gui.snapshot.connection.status = ConnectionStatus::Connected;
+        gui.handle_application_event(AppEvent::Finished {
+            operation_id: OperationId(1),
+            kind: OperationKind::Connection,
+        });
+        assert_eq!(gui.status, "Connected; choose a database");
+
+        gui.handle_application_event(AppEvent::Finished {
+            operation_id: OperationId(2),
+            kind: OperationKind::Schema,
+        });
+        assert_eq!(gui.status, "Loaded 0 columns");
+        gui.snapshot.schema.selected_table = None;
+        gui.handle_application_event(AppEvent::Finished {
+            operation_id: OperationId(3),
+            kind: OperationKind::Schema,
+        });
+        assert_eq!(gui.status, "Loaded 1 tables");
+        gui.snapshot.schema.selected_database = None;
+        gui.handle_application_event(AppEvent::Finished {
+            operation_id: OperationId(4),
+            kind: OperationKind::Schema,
+        });
+        assert_eq!(gui.status, "Loaded 1 databases");
+
+        gui.snapshot.results.rows_seen = 2;
+        gui.handle_application_event(AppEvent::Progress(myr_application::OperationProgress {
+            operation_id: OperationId(5),
+            kind: OperationKind::Query,
+            rows: 1,
+            bytes: 0,
+            message: "query streaming".to_string(),
+        }));
+        assert_eq!(gui.status, "Query: 1 rows");
+        gui.handle_application_event(AppEvent::Finished {
+            operation_id: OperationId(5),
+            kind: OperationKind::Query,
+        });
+        assert_eq!(gui.status, "Query finished: 2 rows");
+        assert_eq!(gui.active_tab, Tab::Results);
+
+        gui.snapshot.export.rows_written = 2;
+        gui.snapshot.export.bytes_written = 48;
+        gui.handle_application_event(AppEvent::Progress(myr_application::OperationProgress {
+            operation_id: OperationId(6),
+            kind: OperationKind::Export,
+            rows: 1,
+            bytes: 24,
+            message: "export streaming".to_string(),
+        }));
+        assert_eq!(gui.status, "Export: 1 rows / 24 bytes");
+        gui.handle_application_event(AppEvent::Finished {
+            operation_id: OperationId(6),
+            kind: OperationKind::Export,
+        });
+        assert_eq!(gui.status, "Export finished: 2 rows, 48 bytes");
+
+        let confirmation = ConfirmationSnapshot {
+            operation_id: OperationId(7),
+            sql: "UPDATE users SET name = 'Grace'".to_string(),
+            reasons: vec!["WriteOperation".to_string()],
+        };
+        gui.handle_application_event(AppEvent::ConfirmationRequired(confirmation));
+        assert_eq!(gui.status, "Confirmation required");
+        assert_eq!(gui.active_tab, Tab::Query);
+
+        gui.handle_application_event(AppEvent::Error(myr_application::AppError::new(
+            myr_application::AppErrorKind::Cancellation,
+            "query cancelled",
+        )));
+        assert_eq!(gui.status, "Cancellation completed");
+
+        gui.handle_application_event(AppEvent::Error(myr_application::AppError::new(
+            myr_application::AppErrorKind::Query,
+            "query failed",
+        )));
+        assert_eq!(gui.status, "Operation failed");
+
+        let mut snapshot = AppSnapshot::default();
+        snapshot.schema.databases = vec!["replacement".to_string()];
+        gui.handle_application_event(AppEvent::SnapshotChanged(Box::new(snapshot)));
+        assert_eq!(gui.snapshot.schema.databases, ["replacement"]);
+        gui.handle_application_event(AppEvent::ResultsBatch {
+            operation_id: OperationId(8),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_seen: 0,
+        });
+        gui.handle_application_event(AppEvent::Finished {
+            operation_id: OperationId(9),
+            kind: OperationKind::Profile,
+        });
+        gui.handle_application_event(AppEvent::Progress(myr_application::OperationProgress {
+            operation_id: OperationId(10),
+            kind: OperationKind::Schema,
+            rows: 0,
+            bytes: 0,
+            message: "schema loading".to_string(),
+        }));
     }
 }

@@ -1,4 +1,5 @@
 use myr_adapters::mysql::{MysqlConnectionBackend, MysqlDataBackend};
+use myr_application::{AppErrorKind, CancellationToken};
 use myr_core::connection_manager::ConnectionBackend;
 use myr_core::profiles::ConnectionProfile;
 use myr_core::query_runner::{QueryBackend, QueryRowStream, QueryValue};
@@ -33,6 +34,28 @@ async fn execute_sql(backend: &MysqlDataBackend, sql: &str) {
         .expect("query stream should advance")
         .is_some()
     {}
+}
+
+async fn matching_processes(backend: &MysqlDataBackend, sql: &str) -> u64 {
+    let escaped = sql.replace('\'', "''");
+    let mut stream = QueryBackend::start_query(
+        backend,
+        &format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO = '{escaped}'"),
+    )
+    .await
+    .expect("process query should start");
+    let row = stream
+        .next_row()
+        .await
+        .expect("process query should advance")
+        .expect("process count row expected");
+    match row.values.first() {
+        Some(QueryValue::Int(value)) => {
+            u64::try_from(*value).expect("count should be non-negative")
+        }
+        Some(QueryValue::UInt(value)) => *value,
+        value => panic!("unexpected process count: {value:?}"),
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -147,6 +170,42 @@ async fn mysql_backend_connection_schema_and_query_paths() {
         .await
         .expect("cancelled stream should return none");
     assert!(cancelled_end.is_none());
+
+    let cancellation = CancellationToken::new();
+    let query_cancellation = cancellation.clone();
+    let query_backend = backend.clone();
+    let pending_query = tokio::spawn(async move {
+        myr_application::ApplicationSession::start_query(
+            &query_backend,
+            "SELECT SLEEP(30)",
+            query_cancellation,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while matching_processes(&backend, "SELECT SLEEP(30)").await == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("sleeping query should become visible");
+    cancellation.cancel();
+    let cancelled_query = tokio::time::timeout(std::time::Duration::from_secs(3), pending_query)
+        .await
+        .expect("cancellation should finish promptly")
+        .expect("query task should join");
+    let cancellation_error = match cancelled_query {
+        Ok(_) => panic!("cancelled query unexpectedly returned a stream"),
+        Err(error) => error,
+    };
+    assert_eq!(cancellation_error.kind, AppErrorKind::Cancellation);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while matching_processes(&backend, "SELECT SLEEP(30)").await != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("cancelled query should leave the server process list");
 
     execute_sql(&backend, "DROP TABLE IF EXISTS integration_types").await;
     execute_sql(
