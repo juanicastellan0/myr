@@ -266,20 +266,17 @@ fn parse_env_usize(name: &str, fallback: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use tempfile::TempDir;
 
     use super::{
-        rotated_audit_path, unix_timestamp_millis, AuditOutcome, AuditRecord, AuditRetentionPolicy,
-        FileAuditTrail,
+        parse_env_u64, parse_env_usize, rotated_audit_path, unix_timestamp_millis, AuditOutcome,
+        AuditRecord, AuditRetentionPolicy, AuditTrailError, FileAuditTrail,
     };
 
-    #[test]
-    fn appends_json_lines_to_file() {
-        let temp_dir = TempDir::new().expect("failed to create temp directory");
-        let path = temp_dir.path().join("audit.ndjson");
-        let trail = FileAuditTrail::from_path(&path);
-
-        let first = AuditRecord {
+    fn sample_record() -> AuditRecord {
+        AuditRecord {
             timestamp_unix_ms: 1,
             profile_name: Some("local".to_string()),
             database: Some("app".to_string()),
@@ -288,7 +285,16 @@ mod tests {
             rows_streamed: None,
             elapsed_ms: None,
             error: None,
-        };
+        }
+    }
+
+    #[test]
+    fn appends_json_lines_to_file() {
+        let temp_dir = TempDir::new().expect("failed to create temp directory");
+        let path = temp_dir.path().join("audit.ndjson");
+        let trail = FileAuditTrail::from_path(&path);
+
+        let first = sample_record();
         trail.append(&first).expect("failed to append first record");
 
         let second = AuditRecord {
@@ -375,5 +381,89 @@ mod tests {
             !rotated_audit_path(&path, 3).exists(),
             "retention should keep at most two archive files"
         );
+    }
+
+    #[test]
+    fn retention_configuration_and_default_path_are_resolved() {
+        let bytes_var = "MYR_TEST_AUDIT_BYTES";
+        let archives_var = "MYR_TEST_AUDIT_ARCHIVES";
+        std::env::remove_var(bytes_var);
+        std::env::remove_var(archives_var);
+        assert_eq!(parse_env_u64(bytes_var, 17), 17);
+        assert_eq!(parse_env_usize(archives_var, 3), 3);
+
+        std::env::set_var(bytes_var, " 42 ");
+        std::env::set_var(archives_var, "5");
+        assert_eq!(parse_env_u64(bytes_var, 17), 42);
+        assert_eq!(parse_env_usize(archives_var, 3), 5);
+        std::env::set_var(bytes_var, "0");
+        std::env::set_var(archives_var, "invalid");
+        assert_eq!(parse_env_u64(bytes_var, 17), 17);
+        assert_eq!(parse_env_usize(archives_var, 3), 3);
+        std::env::remove_var(bytes_var);
+        std::env::remove_var(archives_var);
+
+        let policy = AuditRetentionPolicy::from_env();
+        assert!(policy.max_bytes > 0);
+        assert!(policy.max_archives > 0);
+        let default = FileAuditTrail::load_default().expect("default audit path should resolve");
+        assert!(default.path().ends_with("myr/audit.ndjson"));
+    }
+
+    #[test]
+    fn append_reports_invalid_parent_directory_write_and_retention_errors() {
+        let record = sample_record();
+        let invalid = FileAuditTrail::from_path(PathBuf::new());
+        assert!(matches!(
+            invalid.append(&record),
+            Err(AuditTrailError::InvalidPath(_))
+        ));
+
+        let temp_dir = TempDir::new().expect("failed to create temp directory");
+        let blocked_parent = temp_dir.path().join("blocked");
+        std::fs::write(&blocked_parent, "not a directory").expect("write blocking file");
+        let create_dir = FileAuditTrail::from_path(blocked_parent.join("audit.ndjson"));
+        assert!(matches!(
+            create_dir.append(&record),
+            Err(AuditTrailError::CreateDir { .. })
+        ));
+
+        let directory_path = temp_dir.path().join("audit-directory");
+        std::fs::create_dir(&directory_path).expect("create audit directory");
+        let write = FileAuditTrail::from_path(&directory_path);
+        assert!(matches!(
+            write.append(&record),
+            Err(AuditTrailError::Write { .. })
+        ));
+
+        let path = temp_dir.path().join("retained.ndjson");
+        std::fs::write(&path, "existing").expect("write current audit");
+        std::fs::create_dir(rotated_audit_path(&path, 1)).expect("create invalid oldest archive");
+        let delete = FileAuditTrail::from_path_with_retention(
+            &path,
+            AuditRetentionPolicy {
+                max_bytes: 1,
+                max_archives: 0,
+            },
+        );
+        assert!(matches!(
+            delete.append(&record),
+            Err(AuditTrailError::Delete { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_reports_metadata_errors_for_symlink_loops() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TempDir::new().expect("failed to create temp directory");
+        let path = temp_dir.path().join("audit-loop.ndjson");
+        symlink(&path, &path).expect("create self-referential symlink");
+        let trail = FileAuditTrail::from_path(&path);
+        assert!(matches!(
+            trail.append(&sample_record()),
+            Err(AuditTrailError::Metadata { .. })
+        ));
     }
 }

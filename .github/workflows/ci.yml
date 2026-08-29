@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Lint GitHub Actions workflows
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -config-file .github/actionlint.yaml
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -47,6 +47,66 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --all-features
 
+  gui-linux-package:
+    name: GUI package smoke (Ubuntu 22.04)
+    runs-on: ubuntu-22.04
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      - name: Read GUI version
+        shell: bash
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "myr-gui-app") | .version')"
+          test -n "${version}"
+          echo "GUI_VERSION=${version}" >> "${GITHUB_ENV}"
+
+      - name: Build myr-gui
+        run: cargo build --locked --release -p myr-gui-app --bin myr-gui
+
+      - name: Download verified linuxdeploy
+        run: scripts/download-linuxdeploy.sh
+
+      - name: Package and verify GUI artifacts
+        shell: bash
+        run: |
+          scripts/package-gui-linux.sh \
+            "${GUI_VERSION}" \
+            target/release/myr-gui \
+            tools/linuxdeploy-x86_64.AppImage \
+            dist/release
+          scripts/verify-gui-linux-package.sh "${GUI_VERSION}" dist/release
+          (
+            cd dist/release
+            LC_ALL=C sha256sum ./*.AppImage ./*.tar.gz > SHA256SUMS.txt
+            sha256sum --check SHA256SUMS.txt
+          )
+
+      - name: Upload GUI package smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux-package-${{ github.run_id }}
+          retention-days: 7
+          path: |
+            dist/release/*.AppImage
+            dist/release/*.tar.gz
+            dist/release/SHA256SUMS.txt
+          if-no-files-found: error
+
   coverage-gate:
     name: Coverage gate (llvm-cov)
     runs-on: ubuntu-latest
@@ -63,9 +123,8 @@ jobs:
           --health-timeout=5s
           --health-retries=30
     env:
-      # The shared application migration ratchet is now active.
-      # Raise this to 85% before creating the alpha tag.
-      COVERAGE_MIN_LINES: "80"
+      # Final alpha ratchet. Do not lower this or exclude production code.
+      COVERAGE_MIN_LINES: "85"
       MYR_DB_PASSWORD: root
       MYR_TEST_DB_HOST: 127.0.0.1
       MYR_TEST_DB_PORT: "3306"
@@ -73,7 +132,7 @@ jobs:
       MYR_TEST_DB_DATABASE: myr_bench
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -183,7 +242,7 @@ jobs:
       MYR_DB_PASSWORD: root
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -237,7 +296,7 @@ jobs:
       MYR_TEST_DB_DATABASE: myr_bench
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -287,7 +346,7 @@ jobs:
       MYR_TEST_DB_USER: root
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -310,7 +369,7 @@ jobs:
           - windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

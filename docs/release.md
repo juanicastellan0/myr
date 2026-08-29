@@ -22,6 +22,11 @@ cargo test
 cargo build
 ```
 
+The `GUI package smoke (Ubuntu 22.04)` CI job builds the same AppImage and
+`tar.gz` used by the release workflow, verifies their contents, runs the
+AppImage runtime check, and publishes pre-release artifacts for inspection.
+Do not create the release tag until that job and the coverage gate pass.
+
 2. Sync Homebrew/Scoop install channels to the current commit:
 
 ```bash
@@ -52,6 +57,8 @@ git push origin v0.2.0-alpha.1
 - Supports rerunning an existing tag through `workflow_dispatch` and checks out that exact tag.
 - Builds `myr-app` in release mode with `--locked`.
 - Builds `myr-gui` on Ubuntu 22.04 x86_64 and packages it with `linuxdeploy`.
+- Verifies the downloaded `linuxdeploy` binary against its pinned SHA-256 digest.
+- Uses the same packaging and verification scripts exercised by CI before tagging.
 - Produces archives for:
   - `linux-x86_64`
   - `linux-aarch64`

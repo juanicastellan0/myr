@@ -31,7 +31,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
@@ -106,7 +106,7 @@ jobs:
       BUILD_DIR: target/${{ matrix.rust_target }}/release
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -154,11 +154,10 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       GUI_VERSION: ${{ needs.prepare.outputs.version }}
-      GUI_PLATFORM: linux-x86_64
       APPIMAGE_EXTRACT_AND_RUN: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -176,51 +175,30 @@ jobs:
       - name: Build myr-gui
         run: cargo build --locked --release -p myr-gui-app --bin myr-gui
 
-      - name: Build tar.gz and AppDir
+      - name: Download verified linuxdeploy
+        shell: bash
+        run: scripts/download-linuxdeploy.sh
+
+      - name: Package GUI artifacts
         shell: bash
         run: |
-          set -euo pipefail
-          archive_root="myr-gui-${GUI_VERSION}-${GUI_PLATFORM}"
-          archive_name="${archive_root}.tar.gz"
-          mkdir -p "dist/${archive_root}"
-          cp target/release/myr-gui "dist/${archive_root}/myr-gui"
-          cp README.md LICENSE "dist/${archive_root}/"
-          tar -czf "${archive_name}" -C dist "${archive_root}"
+          scripts/package-gui-linux.sh \
+            "${GUI_VERSION}" \
+            target/release/myr-gui \
+            tools/linuxdeploy-x86_64.AppImage \
+            dist/release
 
-          mkdir -p AppDir/usr/bin
-          mkdir -p AppDir/usr/share/applications
-          mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps
-          mkdir -p AppDir/usr/share/metainfo
-          cp target/release/myr-gui AppDir/usr/bin/myr-gui
-          cp packaging/linux/io.github.juanicastellan0.myr.desktop AppDir/usr/share/applications/
-          cp packaging/linux/io.github.juanicastellan0.myr.svg AppDir/usr/share/icons/hicolor/scalable/apps/
-          cp packaging/linux/io.github.juanicastellan0.myr.metainfo.xml \
-            AppDir/usr/share/metainfo/io.github.juanicastellan0.myr.appdata.xml
-
-      - name: Build AppImage with linuxdeploy
+      - name: Verify GUI artifacts
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p tools
-          curl --fail --location --retry 3 \
-            --output tools/linuxdeploy-x86_64.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x tools/linuxdeploy-x86_64.AppImage
-          tools/linuxdeploy-x86_64.AppImage \
-            --appdir AppDir \
-            --executable AppDir/usr/bin/myr-gui \
-            --desktop-file packaging/linux/io.github.juanicastellan0.myr.desktop \
-            --icon-file packaging/linux/io.github.juanicastellan0.myr.svg \
-            --output appimage
-          mv ./*.AppImage "myr-gui-${GUI_VERSION}-${GUI_PLATFORM}.AppImage"
+        run: scripts/verify-gui-linux-package.sh "${GUI_VERSION}" dist/release
 
       - name: Upload GUI artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-gui-linux-x86_64
           path: |
-            myr-gui-${{ needs.prepare.outputs.version }}-linux-x86_64.AppImage
-            myr-gui-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz
+            dist/release/myr-gui-${{ needs.prepare.outputs.version }}-linux-x86_64.AppImage
+            dist/release/myr-gui-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz
           if-no-files-found: error
 
   publish:
@@ -249,7 +227,8 @@ jobs:
             echo "No release archives found."
             exit 1
           fi
-          sha256sum "${files[@]}" > SHA256SUMS.txt
+          LC_ALL=C sha256sum "${files[@]}" > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
 
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2

@@ -173,7 +173,7 @@ impl TuiApp {
         self.status_line = "Returned to latest editor query".to_string();
     }
 
-    fn record_query_history(&mut self, sql: &str) {
+    pub(super) fn record_query_history(&mut self, sql: &str) {
         let trimmed = sql.trim();
         if trimmed.is_empty() {
             return;
@@ -215,7 +215,7 @@ impl TuiApp {
         (line, column)
     }
 
-    fn start_wizard_edit(&mut self) {
+    pub(super) fn start_wizard_edit(&mut self) {
         if self.pane != Pane::ConnectionWizard || self.wizard_form.editing {
             return;
         }
@@ -228,7 +228,7 @@ impl TuiApp {
         );
     }
 
-    fn commit_wizard_edit(&mut self) {
+    pub(super) fn commit_wizard_edit(&mut self) {
         if self.pane != Pane::ConnectionWizard || !self.wizard_form.editing {
             return;
         }
@@ -239,7 +239,7 @@ impl TuiApp {
         self.status_line = format!("Saved {}", self.wizard_form.active_field.label());
     }
 
-    fn cancel_wizard_edit(&mut self) {
+    pub(super) fn cancel_wizard_edit(&mut self) {
         if self.pane != Pane::ConnectionWizard || !self.wizard_form.editing {
             return;
         }

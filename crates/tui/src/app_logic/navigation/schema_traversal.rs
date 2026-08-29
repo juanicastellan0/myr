@@ -167,7 +167,7 @@ impl TuiApp {
         );
     }
 
-    fn navigate_schema_databases(&mut self, direction: DirectionKey) {
+    pub(super) fn navigate_schema_databases(&mut self, direction: DirectionKey) {
         if self.schema_databases.is_empty() {
             self.status_line = "No databases available".to_string();
             return;
@@ -212,7 +212,7 @@ impl TuiApp {
         }
     }
 
-    fn navigate_schema_tables(&mut self, direction: DirectionKey) {
+    pub(super) fn navigate_schema_tables(&mut self, direction: DirectionKey) {
         if self.schema_tables.is_empty() {
             self.status_line = "No tables available".to_string();
             return;
@@ -244,7 +244,7 @@ impl TuiApp {
         }
     }
 
-    fn navigate_schema_columns(&mut self, direction: DirectionKey) {
+    pub(super) fn navigate_schema_columns(&mut self, direction: DirectionKey) {
         if self.schema_columns.is_empty() {
             self.status_line = "No columns available".to_string();
             return;
@@ -274,7 +274,7 @@ impl TuiApp {
         }
     }
 
-    fn reload_tables_for_active_database(&mut self) {
+    pub(super) fn reload_tables_for_active_database(&mut self) {
         let Some(database_name) = self.active_database.clone() else {
             self.schema_tables.clear();
             self.selected_table_index = 0;
@@ -386,7 +386,7 @@ impl TuiApp {
         self.reload_relationships_for_selected_table();
     }
 
-    fn reload_relationships_for_selected_table(&mut self) {
+    pub(super) fn reload_relationships_for_selected_table(&mut self) {
         let Some(table_name) = self.selection.table.clone() else {
             self.schema_relationships.clear();
             self.selected_relationship_index = 0;
@@ -415,7 +415,7 @@ impl TuiApp {
         self.selected_relationship_index = 0;
     }
 
-    fn set_query_editor_to_selected_table(&mut self) {
+    pub(super) fn set_query_editor_to_selected_table(&mut self) {
         let Some(table) = self.selection.table.as_deref() else {
             return;
         };
