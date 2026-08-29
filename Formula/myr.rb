@@ -3,7 +3,7 @@ class Myr < Formula
   homepage "https://github.com/juanicastellan0/myr"
   url "https://github.com/juanicastellan0/myr.git",
       tag: "v0.2.0-alpha.1",
-      revision: "d6b830a9d1ef0f89d72b94ac0e2651783927e5fd"
+      revision: "18ca0dfc9b2be75fe2f91316450cd1d1705cd1d3"
   license "MIT"
   head "https://github.com/juanicastellan0/myr.git", branch: "main"
 
